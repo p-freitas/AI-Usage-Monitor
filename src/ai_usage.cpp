@@ -289,7 +289,7 @@ Usage ParseCodex(const json::Json* reply) {
 }
 
 Usage ReadCodex(Cli& cli) {
-    if (!cli.Send(R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_monitor","version":"1.0.1"}}})" "\n"))
+    if (!cli.Send(R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_monitor","version":"1.0.2"}}})" "\n"))
         return {};
     std::string response;
     size_t start = 0;

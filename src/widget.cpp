@@ -391,7 +391,8 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
         SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
     }
-    WatchWidgetsButton(g_taskbar);
+    // The classic taskbar exposes its weather widget as a native window, handled by Reposition.
+    if (!g_rebar) WatchWidgetsButton(g_taskbar);
     g_lastDpi = Dpi();
     Paint();
     g_lastW = -1;

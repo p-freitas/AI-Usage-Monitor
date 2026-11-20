@@ -36,9 +36,19 @@ Use your own install path if you chose a different folder. **Copy Claude Code li
 
 <img src="docs/images/windows-taskbar.png" width="480" alt="AI Usage Monitor alongside the Windows notification area and clock">
 
-## Use with Wireless Device Battery Monitor
+## Use alongside BatteryHub
 
-Both apps can run under the same Windows account. When the Wireless Battery taskbar widget is visible, AI Usage Monitor positions itself next to it on the side away from the notification area. Each app has its own executable, settings, tray icons and startup entry. If you already use a modified Wireless Battery build that also shows AI limits, you can hide the duplicate rows from its own menu.
+AI Usage Monitor and BatteryHub (formerly Wireless Device Battery Monitor) can run side by side on the Windows taskbar. When both widgets are visible, AI Usage Monitor displays Claude and Codex usage next to BatteryHub's device battery levels. Both apps have their own settings, tray icons and startup entries. [BatteryHub by krisgfx9](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor)
+
+![AI Usage Monitor showing Claude and Codex usage next to BatteryHub showing headset, mouse and keyboard battery levels](docs/images/batteryhub-side-by-side.png)
+
+## Memory and CPU
+
+AI Usage Monitor is a native C++/Win32 app. In a four-minute Windows 10 test, v1.0.1 used **about 2.9 MiB of private RAM at idle**. Its total working set was about 17 MiB, including shared Windows pages. The monitor process averaged about 0.5% of one logical CPU during the test.
+
+In v1.0.2, the classic Windows taskbar uses its existing native window lookup for the weather widget. A controlled test with both usage indicators showed **about 0.8 MiB less private RAM** after removing the redundant UI Automation lookup. BatteryHub, the project that inspired this widget, reports about 2 MB of RAM for its own app. [BatteryHub README](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor#readme)
+
+The monitor starts the installed CLIs briefly for account-wide checks. In the same Windows 10 test, the Claude Code subprocess reached about 200 MiB of private RAM during a check and exited a few seconds later. Those short-lived processes are measured separately from the monitor's idle footprint.
 
 ## Build
 
@@ -50,4 +60,4 @@ ISCC.exe installer\AIUsageMonitor.iss
 
 ## Credits and license
 
-AI Usage Monitor is directly inspired by [Wireless Device Battery Monitor by krisgfx9](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor) and adapts its Windows taskbar widget. See [credits](CREDITS.md) and the [GPL-3.0 license](LICENSE) for the terms for using, changing and sharing this project.
+AI Usage Monitor is directly inspired by BatteryHub and adapts its Windows taskbar widget. See [credits](CREDITS.md) and the [GPL-3.0 license](LICENSE) for the terms for using, changing and sharing this project.
