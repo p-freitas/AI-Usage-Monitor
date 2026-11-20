@@ -2,6 +2,8 @@
 
 AI Usage Monitor displays the percentage of the **5-hour** and **7-day** subscription limits used by Claude Code and Codex in the Windows taskbar.
 
+![AI Usage Monitor displaying 5-hour and 7-day usage for Claude Code and Codex](docs/images/usage-monitor.png)
+
 **AI Usage Monitor uses zero model tokens.** It reads quota metadata using the installed CLIs and receives updates from your existing sessions. It sends no model prompts and adds no token usage when it refreshes.
 
 ## Install
@@ -31,6 +33,8 @@ Use your own install path if you chose a different folder. **Copy Claude Code li
 - Codex reads account limits at startup and watches local session events for live updates. When available, the last unexpired local reading appears dimmed until a new reading arrives. Install either Codex CLI or Codex Desktop and sign in.
 - Claude Code live updates use the status-line payload from your trusted projects. Background polling uses the built-in `/usage` command. If you install Claude Code later, choose **Open Claude Code setup** from the monitor menu, complete the setup shown there and choose **Refresh now**.
 - Both accounts are checked every two minutes to pick up changes from other devices. The monitor also offers notification-area icons for taskbars that cannot host the widget.
+
+<img src="docs/images/windows-taskbar.png" width="480" alt="AI Usage Monitor alongside the Windows notification area and clock">
 
 ## Use with Wireless Device Battery Monitor
 
