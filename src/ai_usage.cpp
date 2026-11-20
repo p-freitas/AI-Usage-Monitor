@@ -1,4 +1,5 @@
 #include "ai_usage.h"
+#include "app_version.h"
 #include "json_reader.h"
 
 #include <algorithm>
@@ -288,9 +289,17 @@ Usage ParseCodex(const json::Json* reply) {
     return usage;
 }
 
-Usage ReadCodex(Cli& cli) {
-    if (!cli.Send(R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_monitor","version":"1.0.2"}}})" "\n"))
-        return {};
+bool CodexNeedsSignIn(const json::Json* result) {
+    const auto* account = Object(result, "account");
+    const auto* auth = Object(result, "requiresOpenaiAuth");
+    return (!account || account->type == json::Json::Null) &&
+        auth && auth->type == json::Json::Bool && auth->num;
+}
+
+Reading ReadCodex(Cli& cli) {
+    if (!cli.Send(R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_monitor","version":")"
+                  AUM_VERSION_STRING R"("}}})" "\n"))
+        return {{}, Connection::Unavailable};
     std::string response;
     size_t start = 0;
     while (cli.Read(response)) {
@@ -305,12 +314,22 @@ Usage ReadCodex(Cli& cli) {
             const auto* id = Object(&message, "id");
             if (Number(id, 1) && result) {
                 if (!cli.Send(R"({"method":"initialized"})" "\n"
-                              R"({"id":2,"method":"account/rateLimits/read"})" "\n")) return {};
+                              R"({"id":2,"method":"account/read","params":{"refreshToken":false}})" "\n"))
+                    return {{}, Connection::Unavailable};
             }
-            if (Number(id, 2)) return ParseCodex(result);
+            if (Number(id, 2)) {
+                if (CodexNeedsSignIn(result)) return {{}, Connection::SignIn};
+                if (!cli.Send(R"({"id":3,"method":"account/rateLimits/read"})" "\n"))
+                    return {{}, Connection::Unavailable};
+            }
+            if (Number(id, 3)) {
+                auto usage = ParseCodex(result);
+                return {usage, usage.Available() ? Connection::Ready :
+                    (result ? Connection::Waiting : Connection::Unavailable)};
+            }
         }
     }
-    return {};
+    return {{}, Connection::Unavailable};
 }
 
 // Rebuild the accessibility screen because ConPTY sends only the changed rows
@@ -410,12 +429,14 @@ bool ContainsText(const std::array<std::string, TERMINAL_ROWS>& rows, const char
     });
 }
 
-enum class ClaudeStartup { Waiting, NeedsSetup, Ready };
+enum class ClaudeStartup { Waiting, NeedsSetup, NeedsSignIn, Ready };
 
 ClaudeStartup ClaudeStartupState(const std::array<std::string, TERMINAL_ROWS>& rows) {
+    if (ContainsText(rows, "Select login method") || ContainsText(rows, "Please run /login") ||
+        ContainsText(rows, "Not logged in")) return ClaudeStartup::NeedsSignIn;
     if (ContainsText(rows, "Choose the text style") || ContainsText(rows, "Quick safety check") ||
         ContainsText(rows, "Do you trust the files in this folder?") ||
-        ContainsText(rows, "Yes, I trust this folder") || ContainsText(rows, "Select login method"))
+        ContainsText(rows, "Yes, I trust this folder"))
         return ClaudeStartup::NeedsSetup;
     for (const auto& row : rows) {
         if (row.find('$') != std::string::npos && row.find_first_not_of(" $") == std::string::npos)
@@ -424,7 +445,7 @@ ClaudeStartup ClaudeStartupState(const std::array<std::string, TERMINAL_ROWS>& r
     return ClaudeStartup::Waiting;
 }
 
-Usage ReadClaude(Cli& cli) {
+Reading ReadClaude(Cli& cli) {
     std::string output;
     size_t processed = 0;
     bool typed = false, submitted = false, refreshing = false;
@@ -439,21 +460,25 @@ Usage ReadClaude(Cli& cli) {
                 usage = ParseClaude(rows, refreshing);
             } else {
                 auto startup = ClaudeStartupState(rows);
-                if (startup == ClaudeStartup::NeedsSetup) return {};
+                if (startup == ClaudeStartup::NeedsSetup) return {{}, Connection::Setup};
+                if (startup == ClaudeStartup::NeedsSignIn) return {{}, Connection::SignIn};
                 if (!typed && startup == ClaudeStartup::Ready) {
-                    if (!cli.Send("/usage")) return {};
+                    if (!cli.Send("/usage")) return {{}, Connection::Unavailable};
                     typed = true;
                 }
                 // Confirm the built-in command in autocomplete before pressing Enter.
                 if (typed && ContainsText(rows, "Show session cost, plan usage")) {
-                    if (!cli.Send("\r")) return {};
+                    if (!cli.Send("\r")) return {{}, Connection::Unavailable};
                     submitted = true;
                 }
             }
         }
-        if (usage.Available() && !refreshing && GetTickCount64() - lastChange >= 250) return usage;
+        if (usage.Available() && !refreshing && GetTickCount64() - lastChange >= 250)
+            return {usage, Connection::Ready};
     }
-    return refreshing ? Usage{} : usage;
+    if (refreshing) return {{}, Connection::Waiting};
+    return {usage, usage.Available() ? Connection::Ready :
+        (submitted ? Connection::Waiting : Connection::Unavailable)};
 }
 
 } // namespace
@@ -478,23 +503,26 @@ bool IsInstalled(Provider provider) {
         (provider == Provider::Codex && !FindCodexDesktopCli().empty());
 }
 
-Usage Poll(Provider provider, HANDLE stop) {
+Reading Poll(Provider provider, HANDLE stop) {
     auto read = [&](const std::wstring& exe) {
-        Usage usage;
-        if (exe.empty()) return usage;
+        if (exe.empty()) return Reading{};
+        Reading reading{{}, Connection::Unavailable};
         Cli cli(stop);
         if (cli.Start(exe, provider))
-            usage = provider == Provider::Claude ? ReadClaude(cli) : ReadCodex(cli);
-        usage.installed = true;
-        return usage;
+            reading = provider == Provider::Claude ? ReadClaude(cli) : ReadCodex(cli);
+        reading.usage.installed = true;
+        return reading;
     };
     auto exe = FindCli(provider);
     auto usage = read(exe);
-    if (provider == Provider::Codex && !usage.Available() &&
+    if (provider == Provider::Codex && !usage.usage.Available() &&
         (!stop || WaitForSingleObject(stop, 0) == WAIT_TIMEOUT)) {
         auto desktop = FindCodexDesktopCli();
-        if (!desktop.empty() && _wcsicmp(exe.c_str(), desktop.c_str()) != 0)
-            usage = read(desktop);
+        if (!desktop.empty() && _wcsicmp(exe.c_str(), desktop.c_str()) != 0) {
+            auto fallback = read(desktop);
+            if (fallback.connection != Connection::Unavailable || usage.connection != Connection::SignIn)
+                usage = fallback;
+        }
     }
     return usage;
 }
@@ -531,7 +559,8 @@ bool PrepareClaudeSetup() {
             if (startup != ClaudeStartup::Waiting) break;
         }
     }
-    return startup == ClaudeStartup::Ready || (startup == ClaudeStartup::NeedsSetup && OpenClaudeSetup());
+    return startup == ClaudeStartup::Ready ||
+        ((startup == ClaudeStartup::NeedsSetup || startup == ClaudeStartup::NeedsSignIn) && OpenClaudeSetup());
 }
 
 } // namespace ai

@@ -1,0 +1,89 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+      - name: Read version and select update channel
+        shell: pwsh
+        run: |
+          $header = Get-Content res/version.h -Raw
+          if ($header -notmatch '(?m)^#define AUM_VERSION_STRING "((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"\s*$') {
+            throw 'Invalid application version.'
+          }
+          $version = $Matches[1]
+          $official = 0
+          if ($env:GITHUB_REF.StartsWith('refs/tags/')) {
+            if ($env:GITHUB_REF_NAME -cne "v$version") { throw 'Tag does not match the application version.' }
+            if ($env:GITHUB_REPOSITORY -ieq 'p-freitas/AI-Usage-Monitor') { $official = 1 }
+          }
+          Add-Content $env:GITHUB_ENV "AUM_VERSION=$version"
+          Add-Content $env:GITHUB_ENV "AUM_OFFICIAL=$official"
+      - name: Build and test
+        shell: msys2 {0}
+        run: |
+          set -e
+          make -j2 OFFICIAL="$AUM_OFFICIAL"
+          make test
+      - name: Build installer and generate checksum
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          }
+          if ((Get-Item AIUsageMonitor.exe).VersionInfo.ProductVersion -ne $env:AUM_VERSION) {
+            throw 'The built executable version does not match the release.'
+          }
+          & $compiler "/DAppVersion=$env:AUM_VERSION" installer/AIUsageMonitor.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
+          $name = "AIUsageMonitor-Setup-$env:AUM_VERSION.exe"
+          $hash = (Get-FileHash -LiteralPath "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", "$hash  $name`n")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installer
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    if: github.repository == 'p-freitas/AI-Usage-Monitor' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-installer
+          path: dist
+      - name: Upload to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft >/dev/null 2>&1; then
+            test "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "AI Usage Monitor ${tag#v}" --generate-notes
+          fi

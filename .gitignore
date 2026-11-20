@@ -2,3 +2,6 @@
 /dist/
 /AIUsageMonitor.exe
 *.o
+*.pfx
+*.p12
+*.wbk

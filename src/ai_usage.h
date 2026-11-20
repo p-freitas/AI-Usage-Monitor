@@ -7,6 +7,7 @@ namespace ai {
 
 enum class Provider { Claude, Codex };
 enum class UsageSource { Account, Live, LastKnown };
+enum class Connection { Missing, Waiting, SignIn, Setup, Unavailable, Ready };
 struct Usage {
     int fiveHours = -1;
     int week = -1;
@@ -19,6 +20,12 @@ struct UsageUpdate {
     Usage usage;
     ULONGLONG observed = 0;  // UTC FILETIME, for ordering live events and background reads
     UsageSource source = UsageSource::Account;
+    Connection connection = Connection::Waiting;
+};
+
+struct Reading {
+    Usage usage;
+    Connection connection = Connection::Missing;
 };
 
 struct UsageState {
@@ -50,7 +57,7 @@ int ConfigureClaudeTrust(bool enable);
 const wchar_t* Name(Provider provider);
 std::wstring Format(const Usage& usage);
 bool IsInstalled(Provider provider);
-Usage Poll(Provider provider, HANDLE stop = nullptr);
+Reading Poll(Provider provider, HANDLE stop = nullptr);
 bool OpenClaudeSetup();
 bool PrepareClaudeSetup();
 

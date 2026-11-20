@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.0.2"
+  #define AppVersion "1.1.0"
 #endif
 #define Root ".."
 
@@ -22,6 +22,10 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
+#ifdef AuthenticodeSignTool
+SignTool={#AuthenticodeSignTool}
+SignedUninstaller=yes
+#endif
 
 [Messages]
 SelectTasksLabel2=Enable Claude Code live updates for reliable usage readings. Setup will update the Claude Code status line and authorize the monitor's dedicated empty folder.
@@ -64,6 +68,22 @@ begin
     RegDeleteValue(HKCU, RunKey, RunValue);
 end;
 
+function IsUpdate(): Boolean;
+begin
+  Result := ExpandConstant('{param:AUMUPDATE|0}') = '1';
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if IsUpdate() then begin
+    if not FileExists(ExpandConstant('{app}\AIUsageMonitor.exe')) then
+      Result := 'Open the installer normally to install AI Usage Monitor.'
+    else if RunApp('--quit') <> 0 then
+      Result := 'Close AI Usage Monitor and try the update again.';
+  end;
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
@@ -76,6 +96,7 @@ procedure CurStepChanged(Step: TSetupStep);
 var ResultCode: Integer;
 var Details: String;
 begin
+  if IsUpdate() then exit;
   if (Step = ssInstall) and FileExists(ExpandConstant('{app}\AIUsageMonitor.exe')) then
     RunApp('--quit');
   if Step <> ssPostInstall then exit;

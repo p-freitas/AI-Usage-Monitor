@@ -10,6 +10,8 @@ AI Usage Monitor displays the percentage of the **5-hour** and **7-day** subscri
 
 Download and run the latest `AIUsageMonitor-Setup` installer on Windows 10 or 11 with x64 support. Sign in to the CLI for each provider you use. [Latest release](https://github.com/p-freitas/AI-Usage-Monitor/releases/latest)
 
+**Linux:** The maintainer has never used or tested AI Usage Monitor on Linux. The distributed installer targets Windows. Pull requests are welcome, including contributions toward Linux support.
+
 Select **Enable Claude Code live updates** during installation for reliable Claude readings. If you skip it, the installer asks you to confirm that readings may be delayed or unavailable.
 
 Selecting this option configures the `statusLine` entry in `%USERPROFILE%\.claude\settings.json` or the directory set by `CLAUDE_CONFIG_DIR`. Setup also authorizes the monitor's dedicated empty folder (`%LOCALAPPDATA%\AIUsageMonitor\ClaudeCode`) for background quota checks when the standard Claude Code profile is available. This approval applies only to that folder. If Claude Code needs interactive setup, such as first-time sign-in or consent under a custom profile, the installer opens Claude Code so you can finish it. [Claude Code workspace trust documentation](https://code.claude.com/docs/en/errors#workspace-has-not-been-trusted)
@@ -35,6 +37,16 @@ Use your own install path if you chose a different folder. **Copy Claude Code li
 - Both accounts are checked every two minutes to pick up changes from other devices. The monitor also offers notification-area icons for taskbars that cannot host the widget.
 
 <img src="docs/images/windows-taskbar.png" width="480" alt="AI Usage Monitor alongside the Windows notification area and clock">
+
+### CLI status in the menu
+
+The menu shows both providers even before any usage is available. It tells you whether to install the CLI (or Codex Desktop), sign in, finish Claude Code setup, or wait for the first reading. If a quota check fails, choose **Refresh now** to retry. Missing providers stay out of the taskbar widget.
+
+## Program updates
+
+Official Windows builds check GitHub for a newer stable release shortly after startup and then about once a day. The menu shows an available version and offers **Check for program updates** and **Automatically check for program updates**. Select **Download and install** to approve installation. The monitor verifies the publisher's release signature and the installer's SHA-256 before running it. An in-place update keeps the current settings and reopens the monitor.
+
+The signature used by the updater is separate from the Authenticode publisher signature shown by Windows. GitHub Actions builds and tests the installer and prepares a draft release. See the [release and signing guide](docs/releasing.md).
 
 ## Use alongside BatteryHub
 

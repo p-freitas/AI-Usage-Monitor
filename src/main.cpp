@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "ai_usage.h"
+#include "update_apply.h"
+#include "update_win.h"
 #include "widget.h"
 #include "../res/resource.h"
 
@@ -21,7 +23,7 @@ constexpr UINT PLACEHOLDER_ID = 1;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY,
-    ID_CLAUDE_SETUP, ID_CLAUDE_LIVE_SETTINGS, ID_USAGE_FIRST
+    ID_CLAUDE_SETUP, ID_CLAUDE_LIVE_SETTINGS, ID_APP_UPDATE, ID_AUTO_UPDATE, ID_USAGE_FIRST
 };
 
 constexpr wchar_t kAppName[] = L"AI Usage Monitor";
@@ -46,6 +48,8 @@ struct UsageEntry {
     bool added = false;
     HANDLE refresh = nullptr;
     HANDLE worker = nullptr;
+    ai::Connection connection = ai::Connection::Missing;
+    ULONGLONG connectionObserved = 0;
 };
 std::array<UsageEntry, 2> g_usage = {{
     {ai::Provider::Claude, L"HideClaude", 2, IDI_CLAUDE},
@@ -144,12 +148,27 @@ void TrayDelete(UINT uid) {
 
 std::wstring UsageTip(const UsageEntry& entry) {
     std::wstring line = ai::Name(entry.provider);
-    line += L": " + ai::Format(entry.quota.value);
+    line += L": ";
     if (entry.quota.value.Available())
-        line += L" used";
-    else
-        line += L" (waiting for CLI reading)";
+        line += ai::Format(entry.quota.value) + L" used";
     if (entry.quota.LastKnown()) line += L" (last known)";
+    const wchar_t* hint = nullptr;
+    switch (entry.connection) {
+        case ai::Connection::Missing:
+            hint = entry.provider == ai::Provider::Claude ? L"Install Claude Code CLI" : L"Install Codex CLI or Desktop";
+            break;
+        case ai::Connection::SignIn:
+            hint = entry.provider == ai::Provider::Claude ? L"Sign in to Claude Code" : L"Sign in to Codex (Desktop or codex login)";
+            break;
+        case ai::Connection::Setup: hint = L"Complete Claude Code setup"; break;
+        case ai::Connection::Unavailable: hint = L"Could not read usage. Try Refresh now"; break;
+        case ai::Connection::Waiting: hint = L"Waiting for the first usage reading"; break;
+        case ai::Connection::Ready: break;
+    }
+    if (hint) {
+        if (entry.quota.value.Available()) line += L" - ";
+        line += hint;
+    }
     return line;
 }
 
@@ -268,13 +287,11 @@ void ShowMenu() {
     if (!menu) return;
     for (size_t i = 0; i < g_usage.size(); ++i) {
         const auto& entry = g_usage[i];
-        if (entry.quota.value.installed) {
-            auto line = UsageTip(entry);
-            AppendMenuW(menu, MF_STRING | (IsHidden(entry.key) ? 0 : MF_CHECKED),
-                        ID_USAGE_FIRST + i, line.c_str());
-        }
+        auto line = UsageTip(entry);
+        UINT state = entry.quota.value.installed ? (IsHidden(entry.key) ? 0 : MF_CHECKED) : MF_GRAYED;
+        AppendMenuW(menu, MF_STRING | state, ID_USAGE_FIRST + i, line.c_str());
     }
-    if (g_usage[0].quota.value.installed && !g_usage[0].quota.value.Available())
+    if (g_usage[0].quota.value.installed && g_usage[0].connection != ai::Connection::Ready)
         AppendMenuW(menu, MF_STRING, ID_CLAUDE_SETUP, L"Open Claude Code setup");
     AppendMenuW(menu, MF_STRING, ID_CLAUDE_LIVE_SETTINGS, L"Copy Claude Code live update settings");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -286,6 +303,11 @@ void ShowMenu() {
                 ID_WIDGET_BACKGROUND, L"Taskbar widget background");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_REFRESH, L"Refresh now");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (updates::Busy() ? MF_GRAYED : 0), ID_APP_UPDATE, updates::MenuLabel().c_str());
+    AppendMenuW(menu, MF_STRING | (updates::AutomaticEnabled() ? MF_CHECKED : 0) |
+        (updates::Supported() ? 0 : MF_GRAYED), ID_AUTO_UPDATE, L"Automatically check for program updates");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
     AppendMenuW(menu, MF_STRING, ID_EXIT, L"Exit");
 
@@ -298,6 +320,8 @@ void ShowMenu() {
     DestroyMenu(menu);
     switch (cmd) {
         case ID_REFRESH: RefreshUsage(); break;
+        case ID_APP_UPDATE: updates::Activate(g_hwnd); break;
+        case ID_AUTO_UPDATE: updates::ToggleAutomatic(); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MODE_WIDGET: SetMode(true); break;
@@ -324,7 +348,16 @@ void PublishUsage(size_t provider, const ai::UsageUpdate& reading) {
 
 void ShowUsageUpdate(size_t provider, const ai::UsageUpdate& update) {
     auto& entry = g_usage[provider];
-    if (!entry.quota.Apply(update)) return;
+    bool changed = entry.quota.Apply(update);
+    if (update.source != ai::UsageSource::LastKnown && update.observed >= entry.connectionObserved) {
+        auto state = update.usage.Available() ? ai::Connection::Ready : update.connection;
+        if (entry.connection == ai::Connection::Ready && state == ai::Connection::Waiting)
+            state = ai::Connection::Ready;
+        changed |= entry.connection != state;
+        entry.connection = state;
+        entry.connectionObserved = update.observed;
+    }
+    if (!changed) return;
     ApplyUsage(entry);
     UpdatePlaceholder();
     UpdateWidget();
@@ -345,11 +378,12 @@ DWORD WINAPI UsageWorker(LPVOID context) {
         ULONGLONG start = GetTickCount64();
         const auto observed = ai::Now();
         auto reading = ai::Poll(entry.provider, g_stopEvt);
-        PublishUsage(index, {reading, observed});
-        if (reading.Available()) startupAttempts = ARRAYSIZE(codexRetryDelays);
+        PublishUsage(index, {reading.usage, observed, ai::UsageSource::Account, reading.connection});
+        if (reading.usage.Available()) startupAttempts = ARRAYSIZE(codexRetryDelays);
         const auto elapsed = GetTickCount64() - start;
         DWORD delay = elapsed < USAGE_INTERVAL_MS ? USAGE_INTERVAL_MS - (DWORD)elapsed : 0;
-        if (entry.provider == ai::Provider::Codex && reading.installed &&
+        if (entry.provider == ai::Provider::Codex && reading.usage.installed &&
+            reading.connection != ai::Connection::SignIn &&
             startupAttempts < ARRAYSIZE(codexRetryDelays)) {
             delay = codexRetryDelays[startupAttempts++];
         }
@@ -402,7 +436,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == PBT_APMRESUMEAUTOMATIC) RefreshUsage();
             return TRUE;
         case WM_TIMER:
-            if (wp == TIMER_WIDGET) Reconcile();
+            if (wp == TIMER_WIDGET) { Reconcile(); updates::Tick(h); }
             return 0;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
@@ -412,6 +446,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_DESTROY:
             KillTimer(h, TIMER_WIDGET);
+            updates::Shutdown();
             widget::Destroy();
             SetEvent(g_stopEvt);
             if (g_codexWatcher) WaitForSingleObject(g_codexWatcher, 2000);
@@ -429,6 +464,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
+    if (wcsncmp(command, L"--apply-update", 14) == 0) {
+        int count = 0;
+        auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+        if (!args) return 2;
+        int result = updates::RunApplyMode(count, args);
+        LocalFree(args);
+        return result < 0 ? 2 : result;
+    }
     if (wcscmp(command, L"--claude-statusline") == 0) {
         ai::SubmitClaudeStatus(FindWindowW(kWindowClass, nullptr));
         return 0;
@@ -444,7 +487,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     if (wcscmp(command, L"--quit") == 0) {
         if (auto window = FindWindowW(kWindowClass, nullptr)) {
             PostMessageW(window, WM_CLOSE, 0, 0);
-            for (int i = 0; i < 60 && IsWindow(window); ++i) Sleep(100);
+            for (int i = 0; i < 150 && IsWindow(window); ++i) Sleep(100);
+            if (IsWindow(window)) return 1;
         }
         return 0;
     }
@@ -474,9 +518,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     g_wantWidget = LoadWidgetMode();
     g_widgetBackground = LoadWidgetBackground();
     widget::SetBackground(g_widgetBackground);
-    for (auto& entry : g_usage) entry.quota.value.installed = ai::IsInstalled(entry.provider);
+    for (auto& entry : g_usage) {
+        entry.quota.value.installed = ai::IsInstalled(entry.provider);
+        entry.connection = entry.quota.value.installed ? ai::Connection::Waiting : ai::Connection::Missing;
+    }
     Reconcile();
     ReAddAll();
+    updates::Initialize();
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
     g_codexWatcher = CreateThread(nullptr, 0, CodexWatcher, nullptr, 0, nullptr);
     for (auto& entry : g_usage) {
