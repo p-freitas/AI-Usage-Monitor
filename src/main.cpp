@@ -434,7 +434,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         return 0;
     }
     if (wcscmp(command, L"--enable-claude") == 0) return ai::ConfigureClaudeStatus(ExePath(), true);
-    if (wcscmp(command, L"--disable-claude") == 0) return ai::ConfigureClaudeStatus(ExePath(), false);
+    if (wcscmp(command, L"--enable-claude-trust") == 0) return ai::ConfigureClaudeTrust(true);
+    if (wcscmp(command, L"--prepare-claude") == 0) return ai::PrepareClaudeSetup() ? 0 : 1;
+    if (wcscmp(command, L"--disable-claude") == 0) {
+        int status = ai::ConfigureClaudeStatus(ExePath(), false);
+        int trust = ai::ConfigureClaudeTrust(false);
+        return status ? status : trust;
+    }
     if (wcscmp(command, L"--quit") == 0) {
         if (auto window = FindWindowW(kWindowClass, nullptr)) {
             PostMessageW(window, WM_CLOSE, 0, 0);

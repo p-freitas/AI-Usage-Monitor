@@ -44,11 +44,14 @@ void SubmitClaudeStatus(HWND monitor);
 std::wstring ClaudeStatusSettings(const std::wstring& exe);
 // 0: success, 2: custom status line, 3: unreadable or invalid settings, 4: write failed.
 int ConfigureClaudeStatus(const std::wstring& exe, bool enable);
+std::wstring ClaudeTrustWorkspace(bool enable);
+int ConfigureClaudeTrust(bool enable);
 
 const wchar_t* Name(Provider provider);
 std::wstring Format(const Usage& usage);
 bool IsInstalled(Provider provider);
 Usage Poll(Provider provider, HANDLE stop = nullptr);
 bool OpenClaudeSetup();
+bool PrepareClaudeSetup();
 
 } // namespace ai

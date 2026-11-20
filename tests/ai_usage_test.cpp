@@ -40,6 +40,10 @@ int main() {
     assert(usage.fiveHours == 13 && usage.week == -1);
     assert(ai::Format(usage) == L"5h 13%  7d \u2014");
     assert(ai::Format({75, 34, true}) == L"5h 75%  7d 34%");
+    assert(ai::ClaudeStartupState(ai::TerminalRows("Starting Claude Code")) == ai::ClaudeStartup::Waiting);
+    assert(ai::ClaudeStartupState(ai::TerminalRows("  $  ")) == ai::ClaudeStartup::Ready);
+    assert(ai::ClaudeStartupState(ai::TerminalRows("Quick safety check\r\n  $  ")) == ai::ClaudeStartup::NeedsSetup);
+    assert(ai::ClaudeStartupState(ai::TerminalRows("Select login method")) == ai::ClaudeStartup::NeedsSetup);
 
     auto live = ai::events::ParseCodexEvent(
         R"({"timestamp":"2026-11-19T20:00:01.123456Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":25.5,"window_minutes":300,"resets_at":1795120000},"secondary":{"used_percent":44,"window_minutes":10080,"resets_at":1795500000}}}})");

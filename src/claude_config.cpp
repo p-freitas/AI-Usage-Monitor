@@ -1,6 +1,7 @@
 #include "ai_usage.h"
 #include "json_reader.h"
 #include <wincrypt.h>
+#include <algorithm>
 #include <string_view>
 
 namespace ai {
@@ -173,25 +174,10 @@ std::wstring Environment(const wchar_t* name) {
     return value;
 }
 
-} // namespace settings
-
-std::wstring ClaudeStatusSettings(const std::wstring& exe) {
-    auto command = settings::Encode(settings::Pipe(L"$input", exe));
-    if (exe.empty() || command.empty()) return {};
-    return L"{\r\n  \"statusLine\": {\r\n    \"type\": \"command\",\r\n    \"command\": \"" + command +
-        L"\"\r\n  }\r\n}";
-}
-
-int ConfigureClaudeStatus(const std::wstring& exe, bool enable) {
-    if (exe.empty()) return 4;
-    auto directory = settings::Environment(L"CLAUDE_CONFIG_DIR");
-    if (directory.empty()) {
-        auto profile = settings::Environment(L"USERPROFILE");
-        if (profile.empty()) return 3;
-        directory = profile + L"\\.claude";
-    }
-    auto path = directory + L"\\settings.json";
-    settings::Handle input{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+template<class Edit>
+int UpdateFile(const std::wstring& directory, const wchar_t* filename, bool enable, Edit edit) {
+    auto path = directory + L"\\" + filename;
+    Handle input{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                                       nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
     bool exists = input.value != INVALID_HANDLE_VALUE;
     std::string contents = "{}";
@@ -200,7 +186,7 @@ int ConfigureClaudeStatus(const std::wstring& exe, bool enable) {
         FILE_ATTRIBUTE_TAG_INFO info{};
         if (!GetFileInformationByHandleEx(input.value, FileAttributeTagInfo, &info, sizeof(info)) ||
             (info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
-            !GetFileSizeEx(input.value, &size) || size.QuadPart <= 0 || size.QuadPart > 2 * 1024 * 1024) return 3;
+            !GetFileSizeEx(input.value, &size) || size.QuadPart <= 0 || size.QuadPart > 16 * 1024 * 1024) return 3;
         contents.resize(static_cast<size_t>(size.QuadPart));
         DWORD got = 0;
         if (!ReadFile(input.value, contents.data(), static_cast<DWORD>(contents.size()), &got, nullptr) ||
@@ -213,13 +199,13 @@ int ConfigureClaudeStatus(const std::wstring& exe, bool enable) {
     }
 
     auto original = contents;
-    int result = settings::Update(contents, exe, enable);
+    int result = edit(contents);
     if (result || contents == original) return result;
     wchar_t temp[MAX_PATH]{};
     if (!GetTempFileNameW(directory.c_str(), L"AUM", 0, temp)) return 4;
     bool written;
     {
-        settings::Handle output{CreateFileW(temp, GENERIC_WRITE, 0, nullptr, TRUNCATE_EXISTING,
+        Handle output{CreateFileW(temp, GENERIC_WRITE, 0, nullptr, TRUNCATE_EXISTING,
                                            FILE_ATTRIBUTE_NORMAL, nullptr)};
         DWORD count = 0;
         written = output.value != INVALID_HANDLE_VALUE &&
@@ -241,6 +227,131 @@ int ConfigureClaudeStatus(const std::wstring& exe, bool enable) {
     }
     DeleteFileW(temp);
     return 4;
+}
+
+enum class PriorTrust { Unmanaged, Missing, Denied };
+constexpr char trustField[] = "hasTrustDialogAccepted";
+constexpr wchar_t trustSubkey[] = L"Software\\AIUsageMonitor";
+constexpr wchar_t trustValue[] = L"ManagedClaudeTrust";
+
+std::string WorkspaceKey(std::wstring path) {
+    std::replace(path.begin(), path.end(), L'\\', L'/');
+    int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(),
+                                     static_cast<int>(path.size()), nullptr, 0, nullptr, nullptr);
+    if (!length) return {};
+    std::string key(length, '\0');
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(),
+                             static_cast<int>(path.size()), key.data(), length, nullptr, nullptr))
+        return {};
+    return key;
+}
+
+// Edit only the dedicated workspace entry. Preserve each unrelated project and setting verbatim.
+int UpdateTrust(std::string& contents, const std::string& key, bool enable, PriorTrust& prior) {
+    size_t bom = contents.compare(0, 3, "\xef\xbb\xbf") == 0 ? 3 : 0;
+    const char* start = contents.data() + bom;
+    json::Parser parser{start, contents.data() + contents.size()};
+    json::Json root;
+    if (!parser.parse(root) || root.type != json::Json::Obj) return 3;
+    const char* close = parser.p;
+    parser.ws();
+    if (parser.p != parser.e) return 3;
+
+    const auto* projects = root.get("projects");
+    if (projects && projects->type != json::Json::Obj) return 3;
+    const auto* project = projects ? projects->get(key.c_str()) : nullptr;
+    if (project && project->type != json::Json::Obj) return 3;
+    const auto* trust = project ? project->get(trustField) : nullptr;
+    if (trust && trust->type != json::Json::Bool) return 3;
+    if (enable && trust && trust->num) return 0;
+    if (!enable && (!trust || !trust->num || prior == PriorTrust::Unmanaged)) return 0;
+
+    auto projectsSpan = FindMember({start, close}, "projects");
+    auto projectSpan = projectsSpan.begin ? FindMember({projectsSpan.begin, projectsSpan.end}, key.c_str()) : Member{};
+    auto trustSpan = projectSpan.begin ? FindMember({projectSpan.begin, projectSpan.end}, trustField) : Member{};
+    if ((projects && !projectsSpan.begin) || (project && !projectSpan.begin) || (trust && !trustSpan.begin))
+        return 3;
+
+    if (trust) {
+        if (!enable && prior == PriorTrust::Missing) {
+            contents.erase(trustSpan.removeBegin - contents.data(), trustSpan.removeEnd - trustSpan.removeBegin);
+        } else {
+            contents.replace(trustSpan.begin - contents.data(), trustSpan.end - trustSpan.begin,
+                             enable ? "true" : "false");
+            if (enable) prior = PriorTrust::Denied;
+        }
+        return 0;
+    }
+
+    std::string field = std::string("\"") + trustField + "\":true";
+    if (!project) field = "\"" + key + "\":{" + field + "}";
+    if (!projects) field = "\"projects\":{" + field + "}";
+    const auto* parent = project ? project : projects ? projects : &root;
+    const char* end = project ? projectSpan.end : projects ? projectsSpan.end : close;
+    if (!parent->obj.empty()) field.insert(0, ",");
+    contents.insert(end - 1 - contents.data(), field);
+    prior = PriorTrust::Missing;
+    return 0;
+}
+
+} // namespace settings
+
+std::wstring ClaudeStatusSettings(const std::wstring& exe) {
+    auto command = settings::Encode(settings::Pipe(L"$input", exe));
+    if (exe.empty() || command.empty()) return {};
+    return L"{\r\n  \"statusLine\": {\r\n    \"type\": \"command\",\r\n    \"command\": \"" + command +
+        L"\"\r\n  }\r\n}";
+}
+
+int ConfigureClaudeStatus(const std::wstring& exe, bool enable) {
+    if (exe.empty()) return 4;
+    auto directory = settings::Environment(L"CLAUDE_CONFIG_DIR");
+    if (directory.empty()) {
+        auto profile = settings::Environment(L"USERPROFILE");
+        if (profile.empty()) return 3;
+        directory = profile + L"\\.claude";
+    }
+    return settings::UpdateFile(directory, L"settings.json", enable,
+        [&](std::string& contents) { return settings::Update(contents, exe, enable); });
+}
+
+int ConfigureClaudeTrust(bool enable) {
+    using namespace settings;
+    auto profile = Environment(L"USERPROFILE");
+    if (profile.empty()) return 3;
+    if (enable && (!Environment(L"CLAUDE_CONFIG_DIR").empty() || !IsInstalled(Provider::Claude))) return 2;
+    auto workspace = ClaudeTrustWorkspace(enable);
+    auto key = WorkspaceKey(workspace);
+    if (key.empty() || key.find('"') != std::string::npos) return enable ? 2 : 0;
+
+    // Track only permission added by this installer so we can restore it on uninstall.
+    auto scope = L"|" + profile + L"|" + workspace;
+    wchar_t value[2 * MAX_PATH + 8]{};
+    DWORD size = sizeof(value);
+    PriorTrust owned = PriorTrust::Unmanaged;
+    LSTATUS read = RegGetValueW(HKEY_CURRENT_USER, trustSubkey, trustValue, RRF_RT_REG_SZ, nullptr, value, &size);
+    if (read == ERROR_SUCCESS) {
+        if (L"1" + scope == value) owned = PriorTrust::Missing;
+        else if (L"2" + scope == value) owned = PriorTrust::Denied;
+        else return 2;
+    } else if (read != ERROR_FILE_NOT_FOUND && read != ERROR_PATH_NOT_FOUND) return 4;
+    if (!enable && owned == PriorTrust::Unmanaged) return 0;
+
+    bool recorded = false;
+    int result = UpdateFile(profile, L".claude.json", enable, [&](std::string& contents) {
+        PriorTrust prior = enable ? PriorTrust::Unmanaged : owned;
+        int edited = UpdateTrust(contents, key, enable, prior);
+        if (edited || !enable || owned != PriorTrust::Unmanaged || prior == PriorTrust::Unmanaged)
+            return edited;
+        auto record = (prior == PriorTrust::Missing ? L"1" : L"2") + scope;
+        recorded = RegSetKeyValueW(HKEY_CURRENT_USER, trustSubkey, trustValue, REG_SZ, record.c_str(),
+                                   static_cast<DWORD>((record.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+        return recorded ? 0 : 4;
+    });
+    if ((result && recorded) || (!enable && !result)) {
+        if (RegDeleteKeyValueW(HKEY_CURRENT_USER, trustSubkey, trustValue) != ERROR_SUCCESS) return 4;
+    }
+    return result;
 }
 
 } // namespace ai

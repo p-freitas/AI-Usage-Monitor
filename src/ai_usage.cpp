@@ -33,15 +33,39 @@ std::wstring Env(const wchar_t* name) {
     return value;
 }
 
-std::wstring ClaudeWorkDir() {
+std::wstring ClaudeWorkspacePath() {
     auto base = Env(L"LOCALAPPDATA");
-    if (base.empty()) return {};
-    base += L"\\AIUsageMonitor";
-    if (!CreateDirectoryW(base.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return {};
-    base += L"\\ClaudeCode";
-    if (!CreateDirectoryW(base.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return {};
-    DWORD attr = GetFileAttributesW(base.c_str());
-    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) ? base : L"";
+    wchar_t full[MAX_PATH];
+    DWORD length = GetFullPathNameW(base.c_str(), MAX_PATH, full, nullptr);
+    if (!length || length >= MAX_PATH || base != full ||
+        base.size() < 3 || base[1] != L':' || base[2] != L'\\') return {};
+    return base + L"\\AIUsageMonitor\\ClaudeCode";
+}
+
+bool EnsureDirectory(const std::wstring& path) {
+    if (!CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+std::wstring ClaudeWorkDir() {
+    auto path = ClaudeWorkspacePath();
+    if (path.empty() || !EnsureDirectory(path.substr(0, path.rfind(L'\\'))) || !EnsureDirectory(path))
+        return {};
+    WIN32_FIND_DATAW entry{};
+    HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &entry);
+    if (search == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? path : L"";
+    do {
+        if (wcscmp(entry.cFileName, L".") != 0 && wcscmp(entry.cFileName, L"..") != 0) {
+            FindClose(search);
+            return {};
+        }
+    } while (FindNextFileW(search, &entry));
+    bool empty = GetLastError() == ERROR_NO_MORE_FILES;
+    FindClose(search);
+    return empty ? path : L"";
 }
 
 std::wstring ClaudeArgs() {
@@ -265,7 +289,7 @@ Usage ParseCodex(const json::Json* reply) {
 }
 
 Usage ReadCodex(Cli& cli) {
-    if (!cli.Send(R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_monitor","version":"1.0.0"}}})" "\n"))
+    if (!cli.Send(R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_monitor","version":"1.0.1"}}})" "\n"))
         return {};
     std::string response;
     size_t start = 0;
@@ -380,6 +404,26 @@ Usage ParseClaude(const std::array<std::string, TERMINAL_ROWS>& rows, bool& refr
     return usage;
 }
 
+bool ContainsText(const std::array<std::string, TERMINAL_ROWS>& rows, const char* text) {
+    return std::any_of(rows.begin(), rows.end(), [&](const auto& row) {
+        return row.find(text) != std::string::npos;
+    });
+}
+
+enum class ClaudeStartup { Waiting, NeedsSetup, Ready };
+
+ClaudeStartup ClaudeStartupState(const std::array<std::string, TERMINAL_ROWS>& rows) {
+    if (ContainsText(rows, "Choose the text style") || ContainsText(rows, "Quick safety check") ||
+        ContainsText(rows, "Do you trust the files in this folder?") ||
+        ContainsText(rows, "Yes, I trust this folder") || ContainsText(rows, "Select login method"))
+        return ClaudeStartup::NeedsSetup;
+    for (const auto& row : rows) {
+        if (row.find('$') != std::string::npos && row.find_first_not_of(" $") == std::string::npos)
+            return ClaudeStartup::Ready;
+    }
+    return ClaudeStartup::Waiting;
+}
+
 Usage ReadClaude(Cli& cli) {
     std::string output;
     size_t processed = 0;
@@ -394,22 +438,14 @@ Usage ReadClaude(Cli& cli) {
             if (submitted) {
                 usage = ParseClaude(rows, refreshing);
             } else {
-                auto contains = [&](const char* text) {
-                    return std::any_of(rows.begin(), rows.end(), [&](const auto& row) {
-                        return row.find(text) != std::string::npos;
-                    });
-                };
-                if (contains("Choose the text style") || contains("Quick safety check") ||
-                    contains("Select login method")) return {};
-                bool prompt = std::any_of(rows.begin(), rows.end(), [](const auto& row) {
-                    return row.find('$') != std::string::npos && row.find_first_not_of(" $") == std::string::npos;
-                });
-                if (!typed && prompt) {
+                auto startup = ClaudeStartupState(rows);
+                if (startup == ClaudeStartup::NeedsSetup) return {};
+                if (!typed && startup == ClaudeStartup::Ready) {
                     if (!cli.Send("/usage")) return {};
                     typed = true;
                 }
                 // Confirm the built-in command in autocomplete before pressing Enter.
-                if (typed && contains("Show session cost, plan usage")) {
+                if (typed && ContainsText(rows, "Show session cost, plan usage")) {
                     if (!cli.Send("\r")) return {};
                     submitted = true;
                 }
@@ -421,6 +457,10 @@ Usage ReadClaude(Cli& cli) {
 }
 
 } // namespace
+
+std::wstring ClaudeTrustWorkspace(bool enable) {
+    return enable ? ClaudeWorkDir() : ClaudeWorkspacePath();
+}
 
 const wchar_t* Name(Provider provider) {
     return provider == Provider::Claude ? L"Claude" : L"Codex";
@@ -473,6 +513,25 @@ bool OpenClaudeSetup() {
     CloseHandle(info.hThread);
     CloseHandle(info.hProcess);
     return true;
+}
+
+bool PrepareClaudeSetup() {
+    auto exe = FindCli(Provider::Claude);
+    if (exe.empty()) return false;
+    auto startup = ClaudeStartup::Waiting;
+    {
+        Cli cli(nullptr);
+        if (!cli.Start(exe, Provider::Claude)) return false;
+        std::string output;
+        size_t processed = 0;
+        while (cli.Read(output)) {
+            if (output.size() == processed) continue;
+            processed = output.size();
+            startup = ClaudeStartupState(TerminalRows(output));
+            if (startup != ClaudeStartup::Waiting) break;
+        }
+    }
+    return startup == ClaudeStartup::Ready || (startup == ClaudeStartup::NeedsSetup && OpenClaudeSetup());
 }
 
 } // namespace ai

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.0.1"
 #endif
 #define Root ".."
 
@@ -23,9 +23,12 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
 
+[Messages]
+SelectTasksLabel2=Enable Claude Code live updates for reliable usage readings. Setup will update the Claude Code status line and authorize the monitor's dedicated empty folder.
+
 [Tasks]
-Name: "autostart"; Description: "Start AI Usage Monitor when I sign in to Windows"; Flags: unchecked
-Name: "claudestatus"; Description: "Enable Claude Code live updates (updates the statusLine setting in your Claude Code settings.json)"; Flags: unchecked
+Name: "claudestatus"; Description: "Enable Claude Code live updates"; GroupDescription: "Claude Code integration (recommended)"; Flags: unchecked
+Name: "autostart"; Description: "Start AI Usage Monitor when I sign in to Windows"; GroupDescription: "Windows startup"; Flags: unchecked
 
 [Files]
 Source: "{#Root}\AIUsageMonitor.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -61,6 +64,14 @@ begin
     RegDeleteValue(HKCU, RunKey, RunValue);
 end;
 
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpSelectTasks) and not WizardSilent() and not WizardIsTaskSelected('claudestatus') then
+    Result := MsgBox('Without live updates, Claude Code usage can be delayed or unavailable. Continue without enabling live updates?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
 procedure CurStepChanged(Step: TSetupStep);
 var ResultCode: Integer;
 var Details: String;
@@ -74,23 +85,26 @@ begin
     RemoveOwnStartup();
   if not WizardIsTaskSelected('claudestatus') then exit;
   ResultCode := RunApp('--enable-claude');
-  if ResultCode = 0 then begin
+  if ResultCode = 0 then
     Log('Claude Code status line configured.');
-    exit;
+  if ResultCode <> 0 then begin
+    if ResultCode = 2 then
+      Details := 'Claude Code already has a custom status line. Setup kept it. See the project README to connect the monitor to that command.'
+    else
+      Details := 'Setup could not configure the Claude Code status line. Use Copy Claude Code live update settings in the monitor menu.';
+    Log(Details + ' Exit code: ' + IntToStr(ResultCode));
+    if not WizardSilent() then MsgBox(Details, mbInformation, MB_OK);
   end;
-  if ResultCode = 2 then
-    Details := 'Claude Code already has a custom status line. Setup kept it. See the project README to connect the monitor to that command.'
-  else
-    Details := 'Setup could not configure the Claude Code status line. Use Copy Claude Code live update settings in the monitor menu.';
-  Log(Details + ' Exit code: ' + IntToStr(ResultCode));
-  if not WizardSilent() then MsgBox(Details, mbInformation, MB_OK);
+  Log('Claude Code workspace authorization exit code: ' + IntToStr(RunApp('--enable-claude-trust')));
+  if not WizardSilent() then
+    Exec(ExpandConstant('{app}\AIUsageMonitor.exe'), '--prepare-claude', '', SW_HIDE, ewNoWait, ResultCode);
 end;
 
 procedure CurUninstallStepChanged(Step: TUninstallStep);
 begin
   if Step = usUninstall then begin
     RunApp('--quit');
-    Log('Claude Code status line cleanup exit code: ' + IntToStr(RunApp('--disable-claude')));
+    Log('Claude Code integration cleanup exit code: ' + IntToStr(RunApp('--disable-claude')));
     RemoveOwnStartup();
   end;
 end;

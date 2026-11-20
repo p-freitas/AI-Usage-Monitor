@@ -23,7 +23,7 @@ test:
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) tests/ai_usage_test.cpp src/claude_config.cpp -o build/ai_usage_test.exe -static -lcrypt32
 	./build/ai_usage_test.exe
-	$(CXX) $(CXXFLAGS) tests/integration_test.cpp -o build/integration_test.exe -static -lcrypt32
+	$(CXX) $(CXXFLAGS) tests/integration_test.cpp src/ai_usage.cpp -o build/integration_test.exe -static -lcrypt32
 	./build/integration_test.exe
 
 .PHONY: test
