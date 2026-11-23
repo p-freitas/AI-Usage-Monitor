@@ -5,15 +5,28 @@
 
 namespace ai {
 
-enum class Provider { Claude, Codex };
+enum class Provider { Claude, Codex, Gemini };
 enum class UsageSource { Account, Live, LastKnown };
-enum class Connection { Missing, Waiting, SignIn, Setup, Unavailable, Ready };
+enum class Connection { Missing, Waiting, SignIn, Setup, Unavailable, Unsupported, NoLimits, Ready };
+enum Limit : size_t { FiveHours, Week, ArgonWeek, LimitCount };
 struct Usage {
-    int fiveHours = -1;
-    int week = -1;
-    bool installed = false;
-    std::array<long long, 2> resetsAt{};
-    bool Available() const { return fiveHours >= 0 || week >= 0; }
+    std::array<int, LimitCount> used;
+    std::array<long long, LimitCount> resetsAt{};
+    bool installed;
+    bool fullSnapshot = false; // Omitted buckets in a successful account snapshot are unavailable.
+
+    Usage(int five = -1, int weekly = -1, bool present = false,
+          std::array<long long, 2> resets = {}) : installed(present) {
+        used.fill(-1);
+        used[FiveHours] = five;
+        used[Week] = weekly;
+        resetsAt[FiveHours] = resets[0];
+        resetsAt[Week] = resets[1];
+    }
+    bool Available() const {
+        for (int percent : used) if (percent >= 0) return true;
+        return false;
+    }
 };
 
 struct UsageUpdate {
@@ -31,11 +44,17 @@ struct Reading {
 struct UsageState {
     Usage value;
     bool Apply(const UsageUpdate& update);
-    bool LastKnown() const { return lastKnown_[0] || lastKnown_[1]; }
+    bool Expire(long long now);
+    bool LastKnown() const {
+        for (bool cached : lastKnown_) if (cached) return true;
+        return false;
+    }
+
+    bool LastKnown(size_t limit) const { return lastKnown_[limit]; }
 
 private:
-    std::array<ULONGLONG, 2> observed_{};
-    std::array<bool, 2> lastKnown_{};
+    std::array<ULONGLONG, LimitCount> observed_{};
+    std::array<bool, LimitCount> lastKnown_{};
 };
 
 constexpr ULONG_PTR CLAUDE_STATUS_MESSAGE = 0x5742434c; // fixed WM_COPYDATA payload tag
@@ -55,8 +74,6 @@ std::wstring ClaudeTrustWorkspace(bool enable);
 int ConfigureClaudeTrust(bool enable);
 
 const wchar_t* Name(Provider provider);
-std::wstring Format(const Usage& usage);
-std::wstring FormatResets(const Usage& usage);
 bool IsInstalled(Provider provider);
 Reading Poll(Provider provider, HANDLE stop = nullptr);
 bool OpenClaudeSetup();

@@ -25,10 +25,16 @@ $(OBJDIR)/resources.o: res/app.rc $(HEADERS) res/app.manifest $(wildcard res/*.i
 	@mkdir -p $(OBJDIR)
 	$(WINDRES) -i $< -o $@ --include-dir res
 
-test: $(OBJDIR)/resources.o
+test: $(OBJDIR)/resources.o $(filter-out $(OBJDIR)/main.o,$(OBJECTS))
 	@mkdir -p build
 	$(TESTCXX) tests/ai_usage_test.cpp src/claude_config.cpp -o build/ai_usage_test.exe -static -lcrypt32
 	./build/ai_usage_test.exe
+	$(TESTCXX) tests/presentation_test.cpp src/presentation.cpp src/ai_usage.cpp -o build/presentation_test.exe -static -lcrypt32
+	./build/presentation_test.exe
+	$(TESTCXX) tests/preferences_test.cpp $(filter-out $(OBJDIR)/main.o,$(OBJECTS)) -o build/preferences_test.exe -static $(LIBS)
+	./build/preferences_test.exe
+	$(TESTCXX) tests/panel_test.cpp $(filter-out $(OBJDIR)/main.o $(OBJDIR)/usage_tip.o,$(OBJECTS)) -o build/panel_test.exe -static $(LIBS)
+	./build/panel_test.exe
 	$(TESTCXX) tests/integration_test.cpp src/ai_usage.cpp -o build/integration_test.exe -static -lcrypt32
 	./build/integration_test.exe
 	$(TESTCXX) tests/update_core_test.cpp src/update_core.cpp -o build/update_core_test.exe -static

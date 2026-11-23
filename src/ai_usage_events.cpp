@@ -1,4 +1,5 @@
 #include "ai_usage.h"
+#include "utc_time.h"
 #include "json_reader.h"
 
 #include <algorithm>
@@ -27,26 +28,6 @@ ULONGLONG FileTimeValue(const FILETIME& ft) {
 
 long long UnixSeconds(ULONGLONG time) {
     return static_cast<long long>((time - EPOCH) / TICKS_PER_SECOND);
-}
-
-// Rollout records use UTC RFC 3339 with optional fractional seconds.
-ULONGLONG RolloutTime(const std::string& text) {
-    SYSTEMTIME time{};
-    int pos = 0;
-    if (std::sscanf(text.c_str(), "%4hu-%2hu-%2huT%2hu:%2hu:%2hu%n", &time.wYear,
-                    &time.wMonth, &time.wDay, &time.wHour, &time.wMinute, &time.wSecond, &pos) != 6)
-        return 0;
-    ULONGLONG fraction = 0;
-    if (text[pos] == '.') {
-        ULONGLONG place = TICKS_PER_SECOND / 10;
-        while (++pos < (int)text.size() && text[pos] >= '0' && text[pos] <= '9') {
-            fraction += (text[pos] - '0') * place;
-            place /= 10;
-        }
-    }
-    FILETIME ft{};
-    if (text.substr(pos) != "Z" || !SystemTimeToFileTime(&time, &ft)) return 0;
-    return FileTimeValue(ft) + fraction;
 }
 
 bool FieldIs(const json::Json* field, const char* text) {
@@ -80,14 +61,14 @@ UsageUpdate ParseCodexEvent(const std::string& line) {
     if (!limits) return {};
     const auto* bucket = limits->get("limit_id");
     if (bucket && bucket->type == json::Json::Str && bucket->str != "codex") return {};
-    UsageUpdate update{{}, RolloutTime(timestamp->str), UsageSource::Live};
+    UsageUpdate update{{}, UtcFileTime(timestamp->str), UsageSource::Live};
     if (!update.observed) return {};
     for (const char* key : {"primary", "secondary"}) {
         const auto* window = limits->get(key);
         if (!window) continue;
         switch (IntInRange(window->get("window_minutes"), -1, 10080)) {
-            case 300: ReadWindow(*window, "used_percent", update.usage.fiveHours, update.usage.resetsAt[0]); break;
-            case 10080: ReadWindow(*window, "used_percent", update.usage.week, update.usage.resetsAt[1]); break;
+            case 300: ReadWindow(*window, "used_percent", update.usage.used[ai::FiveHours], update.usage.resetsAt[0]); break;
+            case 10080: ReadWindow(*window, "used_percent", update.usage.used[ai::Week], update.usage.resetsAt[1]); break;
         }
     }
     update.usage.installed = update.usage.Available();
@@ -104,9 +85,9 @@ Usage ParseClaudeStatus(const std::string& input) {
     if (!limits) return {};
     Usage usage;
     if (const auto* fiveHours = limits->get("five_hour"))
-        ReadWindow(*fiveHours, "used_percentage", usage.fiveHours, usage.resetsAt[0]);
+        ReadWindow(*fiveHours, "used_percentage", usage.used[ai::FiveHours], usage.resetsAt[0]);
     if (const auto* week = limits->get("seven_day"))
-        ReadWindow(*week, "used_percentage", usage.week, usage.resetsAt[1]);
+        ReadWindow(*week, "used_percentage", usage.used[ai::Week], usage.resetsAt[1]);
     usage.installed = usage.Available();
     return usage;
 }
@@ -181,14 +162,14 @@ void ReplayCodexHistory(const std::wstring& dir, HANDLE stop, void (*publish)(co
     std::array<UsageUpdate, 2> newest{};
     for (size_t file = 0; file < count && WaitForSingleObject(stop, 0) == WAIT_TIMEOUT; ++file) {
         ReadCodexTail(files[file].path, [&](const UsageUpdate& update) {
-            const int percentages[] = {update.usage.fiveHours, update.usage.week};
+            const auto& percentages = update.usage.used;
             for (size_t i = 0; i < newest.size(); ++i) {
                 if (percentages[i] < 0 || update.observed < cutoff ||
                     update.observed <= newest[i].observed ||
                     update.usage.resetsAt[i] <= UnixSeconds(now)) continue;
                 newest[i] = update;
                 newest[i].source = UsageSource::LastKnown;
-                (i == 0 ? newest[i].usage.week : newest[i].usage.fiveHours) = -1;
+                (i == 0 ? newest[i].usage.used[ai::Week] : newest[i].usage.used[ai::FiveHours]) = -1;
             }
         });
     }
@@ -233,10 +214,10 @@ void WatchDirectory(const std::wstring& dir, HANDLE stop, bool& replayed, std::a
                 if (file.size() > 14 && file.substr(0, 8) == L"rollout-" &&
                     file.substr(file.size() - 6) == L".jsonl") {
                     ReadCodexTail(dir + L"\\" + name, [&](UsageUpdate update) {
-                        int* percentages[] = {&update.usage.fiveHours, &update.usage.week};
+                        auto& percentages = update.usage.used;
                         for (size_t i = 0; i < latest.size(); ++i) {
-                            if (update.observed <= latest[i]) *percentages[i] = -1;
-                            else if (*percentages[i] >= 0) latest[i] = update.observed;
+                            if (update.observed <= latest[i]) percentages[i] = -1;
+                            else if (percentages[i] >= 0) latest[i] = update.observed;
                         }
                         if (update.usage.Available()) publish(update);
                     });
@@ -257,36 +238,55 @@ ULONGLONG Now() {
     return events::FileTimeValue(ft);
 }
 
+bool UsageState::Expire(long long now) {
+    bool expired = false;
+    for (size_t i = 0; i < value.used.size(); ++i) {
+        if (value.resetsAt[i] <= 0 || value.resetsAt[i] > now) continue;
+        value.used[i] = -1;
+        value.resetsAt[i] = 0;
+        lastKnown_[i] = false;
+        expired = true;
+    }
+    return expired;
+}
+
 bool UsageState::Apply(const UsageUpdate& update) {
-    bool changed = update.usage.installed && !value.installed;
-    value.installed |= update.usage.installed;
-    const int incoming[] = {update.usage.fiveHours, update.usage.week};
-    int* shown[] = {&value.fiveHours, &value.week};
+    bool installed = update.usage.fullSnapshot ? update.usage.installed : value.installed || update.usage.installed;
+    bool changed = installed != value.installed;
+    value.installed = installed;
     const auto now = events::UnixSeconds(Now());
     const bool fromHistory = update.source == UsageSource::LastKnown;
     for (size_t i = 0; i < observed_.size(); ++i) {
         if (lastKnown_[i] && value.resetsAt[i] <= now) {
-            *shown[i] = -1;
+            value.used[i] = -1;
             observed_[i] = 0;
             value.resetsAt[i] = 0;
             lastKnown_[i] = false;
             changed = true;
         }
-        int next = incoming[i];
+        int next = update.usage.used[i];
+        if (update.usage.fullSnapshot && update.observed > observed_[i] && next < 0) {
+            changed |= value.used[i] >= 0;
+            value.used[i] = -1;
+            value.resetsAt[i] = 0;
+            lastKnown_[i] = false;
+            observed_[i] = update.observed;
+            continue;
+        }
         if (next < 0 || next > 100 || !update.observed || update.observed <= observed_[i]) continue;
         auto reset = update.usage.resetsAt[i];
         auto previousReset = value.resetsAt[i];
-        if (fromHistory && (reset <= now || *shown[i] >= 0)) continue;
+        if (fromHistory && (reset <= now || value.used[i] >= 0)) continue;
         if (update.source == UsageSource::Live) {
             if (reset > 0 && (reset <= now || reset < previousReset)) continue;
             // A second active session can publish a cached lower percentage for the same window.
-            if (!lastKnown_[i] && next <= *shown[i] && (!reset || reset == previousReset)) continue;
+            if (!lastKnown_[i] && next <= value.used[i] && (!reset || reset == previousReset)) continue;
         }
         observed_[i] = update.observed;
-        if (reset > 0) value.resetsAt[i] = reset;
-        changed |= *shown[i] != next || lastKnown_[i] != fromHistory || value.resetsAt[i] != previousReset;
+        if (reset > 0 || update.usage.fullSnapshot) value.resetsAt[i] = reset;
+        changed |= value.used[i] != next || lastKnown_[i] != fromHistory || value.resetsAt[i] != previousReset;
         lastKnown_[i] = fromHistory;
-        *shown[i] = next;
+        value.used[i] = next;
     }
     return changed;
 }
@@ -323,7 +323,7 @@ void SubmitClaudeStatus(HWND monitor) {
     }
     auto reading = events::ParseClaudeStatus(input);
     if (!reading.Available()) return;
-    ClaudeStatusData data{reading.fiveHours, reading.week, reading.resetsAt};
+    ClaudeStatusData data{reading.used[ai::FiveHours], reading.used[ai::Week], {reading.resetsAt[0], reading.resetsAt[1]}};
     COPYDATASTRUCT message{CLAUDE_STATUS_MESSAGE, sizeof(data), &data};
     SendMessageTimeoutW(monitor, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&message),
                         SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, nullptr);

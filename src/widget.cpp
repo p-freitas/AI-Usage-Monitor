@@ -2,19 +2,19 @@
 #include "placement.h"
 #include "../res/resource.h"
 
-#include <commctrl.h>
+#include "usage_tip.h"
 #include <uiautomation.h>
 #include <algorithm>
 
 namespace {
 
-HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
+HWND g_wnd, g_taskbar, g_notify, g_rebar;
 HINSTANCE g_instance;
 UINT g_clickMsg;
-bool g_light, g_hover;
+bool g_light, g_hover, g_fits;
 bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
-std::vector<WidgetItem> g_items;
-std::wstring g_tipText;
+std::vector<ui::ProviderView> g_items;
+ui::Preferences g_prefs;
 RECT g_lastTray{}, g_lastBar{}, g_lastWidgets{};
 int g_lastW = -1, g_lastDpi = 0, g_lastLeft = -1;
 SIZE g_size{};
@@ -111,15 +111,10 @@ RECT WidgetsButtonRect() {
     return r;
 }
 
-void ApplyTipTheme() {
-    if (!g_tip) return;
-    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
-    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    static auto setTheme = ux ? (SetWindowThemeFn)GetProcAddress(ux, "SetWindowTheme") : nullptr;
-    if (setTheme) {
-        setTheme(g_tip, g_light ? L"Explorer" : L"DarkMode_Explorer", nullptr);
-        SendMessageW(g_tip, WM_THEMECHANGED, 0, 0);
-    }
+void ShowTip() {
+    RECT bounds{};
+    if (GetWindowRect(g_wnd, &bounds))
+        widget::ShowUsageTip(g_notify, bounds, Dpi(), g_light, g_items, g_prefs, false);
 }
 
 // Creates a font, falling back when the preferred face is not installed (GDI would silently substitute).
@@ -139,7 +134,7 @@ HFONT MakeFont(int px, int weight, const wchar_t* face, const wchar_t* fallback)
     return nullptr;
 }
 
-// Grayscale coverage mask of a string, cropped to its ink bounds.
+// Crop horizontal side bearings, but keep the font line box for a common baseline.
 struct Mask {
     int w = 0, h = 0;
     std::vector<BYTE> a;
@@ -150,13 +145,19 @@ Mask RenderMask(const std::wstring& s, HFONT font) {
     Mask m;
     HDC dc = CreateCompatibleDC(nullptr);
     HGDIOBJ of = SelectObject(dc, font);
-    SIZE sz;
+    SIZE sz{};
     GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
     int W = sz.cx + 8, H = sz.cy + 8;
     BITMAPINFO bi{};
     bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
     void* bits = nullptr;
     HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits) {
+        DeleteObject(bmp);
+        SelectObject(dc, of);
+        DeleteDC(dc);
+        return m;
+    }
     HGDIOBJ ob = SelectObject(dc, bmp);
     memset(bits, 0, (size_t)W * H * 4);
     SetBkMode(dc, TRANSPARENT);
@@ -164,16 +165,16 @@ Mask RenderMask(const std::wstring& s, HFONT font) {
     TextOutW(dc, 4, 4, s.c_str(), (int)s.size());
     GdiFlush();
     auto* p = static_cast<DWORD*>(bits);
-    int x0 = W, y0 = H, x1 = -1, y1 = -1;
+    int x0 = W, x1 = -1;
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
-            if (p[y * W + x] & 0xFF) { x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y); }
+            if (p[y * W + x] & 0xFF) { x0 = std::min(x0, x); x1 = std::max(x1, x); }
     if (x1 >= 0) {
         m.w = x1 - x0 + 1;
-        m.h = y1 - y0 + 1;
+        m.h = sz.cy;
         m.a.resize((size_t)m.w * m.h);
         for (int y = 0; y < m.h; y++)
-            for (int x = 0; x < m.w; x++) m.a[y * m.w + x] = (BYTE)(p[(y0 + y) * W + x0 + x] & 0xFF);
+            for (int x = 0; x < m.w; x++) m.a[y * m.w + x] = (BYTE)(p[(4 + y) * W + x0 + x] & 0xFF);
     }
     SelectObject(dc, ob);
     SelectObject(dc, of);
@@ -246,22 +247,48 @@ struct Canvas {
     }
 };
 
-struct Piece { Mask m; Rgb color; int alpha; int gapAfter; };
+struct Piece {
+    Mask m;
+    Rgb color;
+    int alpha, gapAfter;
+    int badgePadding = 0;
+    int Width() const { return m.w + 2 * badgePadding; }
+};
 
 std::vector<Piece> Layout(int& width) {
     Rgb fg = g_light ? Rgb{0, 0, 0} : Rgb{255, 255, 255};
     HFONT text = MakeFont(Px(13), FW_NORMAL, L"Segoe UI Variable Text", L"Segoe UI");
+    HFONT numeric = MakeFont(Px(13), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");
     std::vector<Piece> out;
-    if (g_items.empty()) out.push_back({RenderResourceIcon(IDI_APP), fg, 170, 0});
-    for (size_t i = 0; i < g_items.size(); ++i) {
-        const auto& item = g_items[i];
-        int alpha = item.dim ? 135 : 255;
-        out.push_back({RenderResourceIcon(item.iconResource), fg, alpha, Px(5)});
-        out.push_back({RenderMask(item.text, text), fg, alpha, i + 1 < g_items.size() ? Px(14) : 0});
+    Mask divider;
+    divider.w = Px(1);
+    divider.h = Px(15);
+    divider.a.assign(divider.w * divider.h, 255);
+    auto dot = RenderMask(L"\u00b7", text);
+    for (const auto& item : g_items) {
+        if (item.strip.empty()) continue;
+        if (!out.empty()) {
+            out.back().gapAfter = Px(7);
+            out.push_back({divider, fg, 84, Px(7)});
+        }
+        out.push_back({RenderResourceIcon(item.icon), fg, 255, Px(6)});
+        bool first = true;
+        for (const auto& part : item.strip) {
+            if (!first) out.push_back({dot, fg, 165, Px(4)});
+            if (!part.label.empty()) out.push_back({RenderMask(part.label, text), fg, 235, Px(4), part.label == L"A" ? Px(3) : 0});
+            auto mask = RenderMask(part.value, part.severity >= ui::Severity::Critical ? numeric : text);
+            auto c = widget::UsageColor(part.severity, g_light, RGB(fg.r, fg.g, fg.b));
+            out.push_back({std::move(mask), {GetRValue(c), GetGValue(c), GetBValue(c)},
+                           part.stale ? 150 : 255, Px(4)});
+            first = false;
+        }
+        out.back().gapAfter = 0;
     }
+    if (out.empty()) out.push_back({RenderResourceIcon(IDI_APP), fg, 170, 0});
+    DeleteObject(numeric);
     DeleteObject(text);
     width = Px(8) * 2;
-    for (const auto& piece : out) width += piece.m.w + piece.gapAfter;
+    for (const auto& piece : out) width += piece.Width() + piece.gapAfter;
     return out;
 }
 
@@ -278,23 +305,29 @@ void Paint() {
     // Nearly transparent background so the whole strip receives mouse input,
     // plus a rounded hover highlight like the system tray icons have.
     for (auto& p : cv.px) p = 0x01000000;
-    auto roundRect = [&](int inset, int r, Rgb c, int a) {
-        for (int y = inset; y < H - inset; y++)
-            for (int x = 0; x < W; x++) {
-                int dx = x < r ? r - x : (x >= W - r ? x - (W - r - 1) : 0);
-                int dy = y < inset + r ? inset + r - y : (y >= H - inset - r ? y - (H - inset - r - 1) : 0);
-                if (dx * dx + dy * dy <= r * r) cv.Blend(x, y, c, a);
+    auto rounded = [&](int left, int top, int right, int bottom, int r, Rgb c, int alpha) {
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                int dx = std::max({left+r-x, x-(right-r-1), 0});
+                int dy = std::max({top+r-y, y-(bottom-r-1), 0});
+                if (dx*dx + dy*dy <= r*r) cv.Blend(x, y, c, alpha);
             }
+        }
     };
-    // Optional plate in the taskbar's own colours: keeps the text readable when a taskbar theme
-    // (e.g. Windhawk's Taskbar Styler) makes the bar transparent over the wallpaper.
-    if (g_background) roundRect(Px(4), Px(6), g_light ? Rgb{ 243, 243, 243 } : Rgb{ 32, 32, 32 }, 240);
-    if (g_hover) roundRect(Px(4), Px(4), g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }, g_light ? 20 : 26);
+    Rgb ink = g_light ? Rgb{0,0,0} : Rgb{255,255,255};
+    if (g_background) {
+        int inset = Px(4);
+        rounded(0, inset, W, H-inset, Px(8), ink, 65);
+        rounded(1, inset+1, W-1, H-inset-1, Px(7), g_light ? Rgb{243,243,243} : Rgb{32,34,40}, 245);
+    }
+    if (g_hover) rounded(0, Px(4), W, H-Px(4), Px(8), ink, g_light ? 20 : 26);
 
     int x = Px(8);
-    for (auto& p : pieces) {
-        cv.Draw(p.m, x, (H - p.m.h) / 2, p.color, p.alpha);
-        x += p.m.w + p.gapAfter;
+    for (const auto& p : pieces) {
+        int y = (H - p.m.h) / 2;
+        if (p.badgePadding) rounded(x, y, x+p.Width(), y+p.m.h, Px(3), ink, 44);
+        cv.Draw(p.m, x+p.badgePadding, y, p.color, p.alpha);
+        x += p.Width() + p.gapAfter;
     }
 
     HDC screen = GetDC(nullptr);
@@ -303,6 +336,12 @@ void Paint() {
     bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
     void* bits = nullptr;
     HBITMAP bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits) {
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        return;
+    }
     memcpy(bits, cv.px.data(), (size_t)W * H * 4);
     HGDIOBJ ob = SelectObject(mem, bmp);
     g_size = { W, H };
@@ -322,20 +361,25 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSEMOVE:
             if (!g_hover) {
                 g_hover = true;
-                TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
+                TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE | TME_HOVER, h, HOVER_DEFAULT };
                 TrackMouseEvent(&t);
                 Paint();
                 widget::Reposition();
             }
             return 0;
+        case WM_MOUSEHOVER:
+            if (g_hover) ShowTip();
+            return 0;
         case WM_MOUSELEAVE:
+            widget::HideHoverTip();
             g_hover = false;
             Paint();
             widget::Reposition();
             return 0;
         case WM_LBUTTONUP:
         case WM_RBUTTONUP:
-            PostMessageW(g_notify, g_clickMsg, 0, 0);
+            widget::HideHoverTip();
+            PostMessageW(g_notify, g_clickMsg, reinterpret_cast<WPARAM>(h), 0);
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
@@ -377,27 +421,12 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
                             g_taskbar, nullptr, inst, nullptr);
     if (!g_wnd) { g_taskbar = nullptr; return false; }
 
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
-    InitCommonControlsEx(&icc);
-    g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
-                            notifyWnd, nullptr, inst, nullptr);
-    if (g_tip) {
-        ApplyTipTheme();
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-        ti.hwnd = notifyWnd;
-        ti.uId = (UINT_PTR)g_wnd;
-        ti.lpszText = const_cast<wchar_t*>(g_tipText.empty() ? L"AI Usage Monitor" : g_tipText.c_str());
-        SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
-        SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
-    }
     // The classic taskbar exposes its weather widget as a native window, handled by Reposition.
     if (!g_rebar) WatchWidgetsButton(g_taskbar);
     g_lastDpi = Dpi();
     Paint();
     g_lastW = -1;
     Reposition();
-    ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
     return true;
 }
 
@@ -410,32 +439,35 @@ void Destroy() {
     }
     g_rebar = nullptr;
     if (g_wbWake) WatchWidgetsButton(nullptr);
-    if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
+    HideHoverTip();
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
     g_taskbar = nullptr;
     g_hover = false;
+    g_fits = false;
 }
+
+void OpenPanel(HWND owner, const RECT& anchor, int dpi, bool light) {
+    ShowUsageTip(owner, anchor, dpi, light, g_items, g_prefs, true);
+}
+
+bool FitsTaskbar() { return g_fits; }
 
 bool Alive() { return g_wnd && IsWindow(g_wnd) && g_taskbar && IsWindow(g_taskbar); }
 
-void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip) {
-    g_items = items;
-    if (tooltip != g_tipText && g_tip) {
-        g_tipText = tooltip;
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.uFlags = TTF_IDISHWND;
-        ti.hwnd = g_notify;
-        ti.uId = (UINT_PTR)g_wnd;
-        ti.lpszText = const_cast<wchar_t*>(g_tipText.c_str());
-        SendMessageW(g_tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
-    }
-    Paint();
-    Reposition();
+void SetItems(std::vector<ui::ProviderView> items, const ui::Preferences& prefs) {
+    bool changed = items.size() != g_items.size() ||
+        !std::equal(items.begin(), items.end(), g_items.begin(), [](const auto& a, const auto& b) {
+            return a.icon == b.icon && a.strip == b.strip;
+        });
+    g_items = std::move(items);
+    g_prefs = prefs;
+    if (changed) { Paint(); Reposition(); }
+    RefreshUsageTip(g_light, g_items, g_prefs);
 }
 
 void SetLightTheme(bool light) {
     g_light = light;
-    ApplyTipTheme();
+    RefreshUsageTip(g_light, g_items, g_prefs);
     Paint();
 }
 
@@ -446,7 +478,9 @@ void SetBackground(bool on) {
 
 bool Reposition() {
     if (!Alive()) return false;
-    if (Dpi() != g_lastDpi) { g_lastDpi = Dpi(); Paint(); }
+    RECT client{};
+    GetClientRect(g_taskbar, &client);
+    if (Dpi() != g_lastDpi || client.bottom != g_size.cy) { g_lastDpi = Dpi(); Paint(); }
     HWND tray = FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr);
     if (!tray) return true;
     RECT tr, bar;
@@ -476,13 +510,30 @@ bool Reposition() {
     ScreenToClient(g_taskbar, &p);
     int left = p.x - g_size.cx - Px(2);
 
-
     // Optional user override in DPI-independent pixels (e.g. for custom padding).
     DWORD customOffset = 0, sz = sizeof(customOffset);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\AIUsageMonitor", L"TaskbarOffset",
                      RRF_RT_REG_DWORD, nullptr, &customOffset, &sz) == ERROR_SUCCESS) {
         left -= Px((int)customOffset);
     }
+
+    // If even the taskbar or peer boundary cannot accommodate the strip, use tray icons.
+    if (left < 0 || left + g_size.cx > bar.right - bar.left) {
+        if (g_fits) {
+            HideHoverTip();
+            ShowWindow(g_wnd, SW_HIDE);
+            g_lastW = -1;
+            g_hover = false;
+            if (g_rebar) PostMessageW(g_taskbar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(bar.right-bar.left, bar.bottom-bar.top));
+        }
+        g_fits = false;
+        return true;
+    }
+    g_fits = true;
+
+    // Give Explorer back the space freed by a shorter strip or a moving peer.
+    if (g_rebar && g_lastLeft >= 0 && left > g_lastLeft)
+        PostMessageW(g_taskbar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(bar.right-bar.left, bar.bottom-bar.top));
 
     // Windows 10: Explorer re-expands the task buttons on its own layout passes; narrow them again.
     if (g_rebar && IsWindow(g_rebar)) {
@@ -515,6 +566,7 @@ bool Reposition() {
     g_lastW = g_size.cx;
     g_lastLeft = left;
     SetWindowPos(g_wnd, HWND_TOP, left, 0, g_size.cx, g_size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    RefreshUsageTip(g_light, g_items, g_prefs);
     return true;
 }
 

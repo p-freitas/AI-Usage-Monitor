@@ -2,3 +2,33 @@
 #define IDI_APP 1
 #define IDI_CLAUDE 101
 #define IDI_CODEX 102
+#define IDI_GEMINI 103
+
+#define IDD_SETTINGS 200
+#define ID_REFRESH 100
+#define ID_AUTOSTART 101
+#define ID_WIDGET_BACKGROUND 102
+#define ID_EXIT 103
+#define ID_MODE_WIDGET 104
+#define ID_MODE_TRAY 105
+#define ID_CLAUDE_SETUP 106
+#define ID_CLAUDE_LIVE_SETTINGS 107
+#define ID_APP_UPDATE 108
+#define ID_AUTO_UPDATE 109
+#define ID_COLORS 110
+#define ID_NOTIFICATIONS 111
+#define ID_DISPLAY 120
+#define ID_RESET 130
+#define ID_WARNING 140
+#define ID_CRITICAL 150
+#define ID_USAGE_FIRST 160
+#define IDC_LOCATION 170
+
+#define IDC_SETTINGS_TITLE 171
+#define IDC_DISPLAY_TITLE 172
+#define IDC_RESET_TITLE 173
+#define IDC_WARNINGS_TITLE 174
+#define IDC_PROVIDERS_TITLE 175
+// Shared IDs for static text; the dialog only uses them to pick colors.
+#define IDC_SETTINGS_HINT 176
+#define IDC_SETTINGS_LABEL 177

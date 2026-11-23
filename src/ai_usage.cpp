@@ -1,4 +1,5 @@
 #include "ai_usage.h"
+#include "utc_time.h"
 #include "app_version.h"
 #include "json_reader.h"
 
@@ -24,7 +25,7 @@ struct Handle {
     HANDLE value = nullptr;
     ~Handle() { Close(); }
     operator HANDLE() const { return value; }
-    void Close() { if (value) CloseHandle(value); value = nullptr; }
+    void Close() { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); value = nullptr; }
 };
 
 std::wstring Env(const wchar_t* name) {
@@ -52,8 +53,7 @@ bool EnsureDirectory(const std::wstring& path) {
         (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-std::wstring ClaudeWorkDir() {
-    auto path = ClaudeWorkspacePath();
+std::wstring EmptyWorkDir(std::wstring path) {
     if (path.empty() || !EnsureDirectory(path.substr(0, path.rfind(L'\\'))) || !EnsureDirectory(path))
         return {};
     WIN32_FIND_DATAW entry{};
@@ -71,22 +71,28 @@ std::wstring ClaudeWorkDir() {
     return empty ? path : L"";
 }
 
+std::wstring ClaudeWorkDir() { return EmptyWorkDir(ClaudeWorkspacePath()); }
+
 std::wstring ClaudeArgs() {
     return LR"( --safe-mode --setting-sources "" --strict-mcp-config --mcp-config "{\"mcpServers\":{}}" --settings "{\"disableAllHooks\":true,\"language\":\"english\"}" --tools "" --no-chrome)";
 }
 
-std::wstring ClaudeEnvironment() {
+std::wstring CliEnvironment(bool claude) {
     constexpr std::wstring_view HISTORY = L"CLAUDE_CODE_SKIP_PROMPT_HISTORY=";
     // The blanket nonessential-traffic flag also prevents /usage from refreshing
     // the account meters. Disable the updater without disabling quota reads.
     constexpr std::wstring_view UPDATE = L"DISABLE_AUTOUPDATER=";
-    std::vector<std::wstring> entries = {std::wstring(HISTORY) + L"1", std::wstring(UPDATE) + L"1"};
+    constexpr std::wstring_view NONINTERACTIVE = L"AGY_CLI_NONINTERACTIVE_HEADLESS=";
+    std::vector<std::wstring> entries;
+    if (claude) entries = {std::wstring(HISTORY) + L"1", std::wstring(UPDATE) + L"1"};
+    else entries = {std::wstring(NONINTERACTIVE) + L"1"};
     auto env = GetEnvironmentStringsW();
     if (!env) return {};
     for (const wchar_t* entry = env; *entry; entry += wcslen(entry) + 1) {
-        if (_wcsnicmp(entry, HISTORY.data(), HISTORY.size()) == 0 ||
+        if (!claude && _wcsnicmp(entry, NONINTERACTIVE.data(), NONINTERACTIVE.size()) == 0) continue;
+        if (claude && (_wcsnicmp(entry, HISTORY.data(), HISTORY.size()) == 0 ||
             _wcsnicmp(entry, UPDATE.data(), UPDATE.size()) == 0 ||
-            _wcsnicmp(entry, L"CLAUDECODE=", 11) == 0) continue;
+            _wcsnicmp(entry, L"CLAUDECODE=", 11) == 0)) continue;
         entries.emplace_back(entry);
     }
     FreeEnvironmentStringsW(env);
@@ -102,7 +108,8 @@ std::wstring ClaudeEnvironment() {
 }
 
 std::wstring FindCli(Provider provider) {
-    const wchar_t* exe = provider == Provider::Claude ? L"claude.exe" : L"codex.exe";
+    const wchar_t* exe = provider == Provider::Gemini ? L"agy.exe" :
+                         provider == Provider::Claude ? L"claude.exe" : L"codex.exe";
     auto path = Env(L"PATH");
     for (size_t start = 0; start < path.size();) {
         size_t end = path.find(L';', start);
@@ -120,7 +127,8 @@ std::wstring FindCli(Provider provider) {
     }
     auto root = Env(provider == Provider::Claude ? L"USERPROFILE" : L"LOCALAPPDATA");
     if (root.empty()) return {};
-    root += provider == Provider::Claude ? L"\\.local\\bin\\claude.exe"
+    if (provider == Provider::Gemini) root += L"\\agy\\bin\\agy.exe";
+    else root += provider == Provider::Claude ? L"\\.local\\bin\\claude.exe"
                                          : L"\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
     return GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES ? L"" : root;
 }
@@ -170,10 +178,16 @@ public:
         if (console_) closeConsole_(console_);
     }
 
-    bool Start(const std::wstring& exe, Provider provider) {
+    bool Start(const std::wstring& exe, Provider provider, bool versionOnly = false) {
         bool terminal = provider == Provider::Claude;
         std::wstring cwd = terminal ? ClaudeWorkDir() : Env(L"USERPROFILE");
-        if (terminal && cwd.empty()) return false;
+        bool gemini = provider == Provider::Gemini;
+        if (gemini) {
+            auto base = Env(L"LOCALAPPDATA");
+            if (base.empty()) return false;
+            cwd = EmptyWorkDir(base + L"\\AIUsageMonitor\\Antigravity");
+        }
+        if ((terminal || gemini) && cwd.empty()) return false;
         Handle childInput, childOutput;
         if (!CreatePipe(&childInput.value, &input_.value, nullptr, 0) ||
             !CreatePipe(&output_.value, &childOutput.value, nullptr, 0)) return false;
@@ -211,8 +225,10 @@ public:
                                         streamHandles, sizeof(streamHandles), nullptr, nullptr);
 
         std::wstring args = L"\"" + exe + L"\"";
-        args += terminal ? ClaudeArgs() + L" --ax-screen-reader" : L" app-server --listen stdio://";
-        auto env = terminal ? ClaudeEnvironment() : std::wstring{};
+        if (gemini) args += versionOnly ? L" --version" : L" -p /usage --output-format json";
+        else args += terminal ? ClaudeArgs() + L" --ax-screen-reader" : L" app-server --listen stdio://";
+        auto env = (terminal || gemini) ? CliEnvironment(terminal) : std::wstring{};
+        if (gemini && env.empty()) { DeleteProcThreadAttributeList(attrs); return false; }
         PROCESS_INFORMATION info{};
         job_.value = CreateJobObjectW(nullptr, nullptr);
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -232,7 +248,13 @@ public:
             TerminateProcess(process_, 1);
             return false;
         }
+        if (gemini) input_.Close();
         return true;
+    }
+
+    bool Succeeded() const {
+        DWORD code = 1;
+        return WaitForSingleObject(process_, 200) == WAIT_OBJECT_0 && GetExitCodeProcess(process_, &code) && code == 0;
     }
 
     bool Send(std::string_view input) {
@@ -247,7 +269,9 @@ public:
             (stop_ && WaitForSingleObject(stop_, 0) == WAIT_OBJECT_0) ||
             !PeekNamedPipe(output_, nullptr, 0, nullptr, &available, nullptr)) return false;
         if (!available) {
-            return WaitForSingleObject(process_, 30) == WAIT_TIMEOUT;
+            if (WaitForSingleObject(process_, 30) == WAIT_TIMEOUT) return true;
+            // A short-lived child can write its entire report immediately before exit.
+            return PeekNamedPipe(output_, nullptr, 0, nullptr, &available, nullptr) && available;
         }
         char buffer[4096];
         DWORD received = 0;
@@ -266,6 +290,106 @@ bool Number(const json::Json* value, double expected) {
     return value && value->type == json::Json::Num && value->num == expected;
 }
 
+Reading ParseGemini(const std::string& output) {
+    Reading reading{{-1, -1, true}, Connection::Unavailable};
+    json::Json root;
+    json::Parser parser{output.data(), output.data() + output.size()};
+    if (!parser.parse(root)) return reading;
+    parser.ws();
+    auto is = [](const json::Json* field, const char* expected) {
+        return field && field->type == json::Json::Str && field->str == expected;
+    };
+    const auto* command = root.get("command");
+    const auto* groups = Object(Object(command, "data"), "groups");
+    if (parser.p != parser.e || !is(root.get("status"), "SUCCESS") ||
+        !is(Object(command, "name"), "usage") || !Number(root.get("num_turns"), 0) ||
+        !Number(Object(root.get("usage"), "total_tokens"), 0) ||
+        !groups || groups->type != json::Json::Arr) return reading;
+
+    // Identifiers, units and UTC timestamps from the signed Windows 1.5.15 JSON report.
+    struct Bucket { const char* group; const char* id; const char* window; Limit limit; };
+    static constexpr Bucket known[] = {
+        {"Gemini Models", "gemini-5h", "5h", FiveHours},
+        {"Gemini Models", "gemini-weekly", "weekly", Week},
+        {"Gemini 4 Argon", "gemini-argon-wtu-weekly", "weekly", ArgonWeek}
+    };
+    auto& usage = reading.usage;
+    usage.fullSnapshot = true;
+    for (const auto& group : groups->arr) {
+        auto* buckets = group.get("buckets");
+        if (!buckets || buckets->type != json::Json::Arr) continue;
+        for (const auto& bucket : buckets->arr) {
+            for (const auto& def : known) {
+                if (!is(group.get("name"), def.group) || !is(bucket.get("id"), def.id) ||
+                    !is(bucket.get("window"), def.window)) continue;
+                const auto* left = bucket.get("remaining_fraction");
+                if (!left || left->type != json::Json::Num || !(left->num >= 0 && left->num <= 1)) continue;
+                int used = static_cast<int>(std::lround((1 - left->num) * 100));
+                usage.used[def.limit] = left->num > 0 ? std::min(used, 99) : 100;
+                const auto* reset = bucket.get("reset_time");
+                auto ticks = reset && reset->type == json::Json::Str ? UtcFileTime(reset->str) : 0;
+                constexpr ULONGLONG epoch = 116444736000000000ULL;
+                usage.resetsAt[def.limit] = ticks > epoch ? (ticks - epoch) / 10000000 : 0;
+            }
+        }
+    }
+    reading.connection = usage.Available() ? Connection::Ready : Connection::NoLimits;
+    return reading;
+}
+
+bool VerifiedAgyVersion(const std::string& text) {
+    auto last = text.find_last_not_of("\r\n");
+    return last != std::string::npos && text.substr(0, last + 1) == "1.5.15";
+}
+
+Reading ReadGemini(const std::wstring& exe, HANDLE stop) {
+    if (exe.empty()) {
+        Reading missing;
+        missing.usage.fullSnapshot = true;
+        return missing;
+    }
+    Reading failure{{-1, -1, true}, Connection::Unavailable};
+    // Hold the same executable against replacement between the version probe and /usage.
+    Handle file{CreateFileW(exe.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr)};
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (file == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file, &info)) return failure;
+    // Only the Gemini polling worker accesses this cache. A changed binary must be probed again.
+    static BY_HANDLE_FILE_INFORMATION verified{};
+    static std::wstring verifiedPath;
+    static bool compatible;
+    if (exe != verifiedPath || info.dwVolumeSerialNumber != verified.dwVolumeSerialNumber ||
+        info.nFileIndexHigh != verified.nFileIndexHigh || info.nFileIndexLow != verified.nFileIndexLow ||
+        info.nFileSizeHigh != verified.nFileSizeHigh || info.nFileSizeLow != verified.nFileSizeLow ||
+        CompareFileTime(&info.ftLastWriteTime, &verified.ftLastWriteTime) != 0) {
+        Cli version(stop);
+        if (!version.Start(exe, Provider::Gemini, true)) return failure;
+        std::string output;
+        while (version.Read(output)) {}
+        if (!version.Succeeded()) return failure;
+        verifiedPath = exe;
+        verified = info;
+        compatible = VerifiedAgyVersion(output);
+    }
+    if (!compatible) {
+        failure.connection = Connection::Unsupported;
+        failure.usage.fullSnapshot = true;
+        return failure;
+    }
+    if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return failure;
+    Cli cli(stop);
+    if (!cli.Start(exe, Provider::Gemini)) return failure;
+    std::string output;
+    while (cli.Read(output)) {
+        if (output.find("Authentication required") != std::string::npos ||
+            output.find("authentication required") != std::string::npos) {
+            failure.connection = Connection::SignIn;
+            failure.usage.fullSnapshot = true;
+            return failure;
+        }
+    }
+    return cli.Succeeded() ? ParseGemini(output) : failure;
+}
+
 Usage ParseCodex(const json::Json* reply) {
     const auto* bucket = Object(Object(reply, "rateLimitsByLimitId"), "codex");
     if (!bucket) bucket = Object(reply, "rateLimits");
@@ -280,11 +404,11 @@ Usage ParseCodex(const json::Json* reply) {
         long long resetsAt = reset && reset->type == json::Json::Num &&
             reset->num > 0 && reset->num < 1e11 ? (long long)reset->num : 0;
         if (Number(minutes, 300)) {
-            usage.fiveHours = percent;
+            usage.used[ai::FiveHours] = percent;
             usage.resetsAt[0] = resetsAt;
         }
         if (Number(minutes, 10080)) {
-            usage.week = percent;
+            usage.used[ai::Week] = percent;
             usage.resetsAt[1] = resetsAt;
         }
     }
@@ -472,7 +596,7 @@ Usage ParseClaude(const std::array<std::string, TERMINAL_ROWS>& rows, bool& refr
         size_t start = end;
         while (start && meter[start - 1] >= '0' && meter[start - 1] <= '9') --start;
         if (end - start < 1 || end - start > 3) continue;
-        (session ? usage.fiveHours : usage.week) = std::min(100, std::stoi(meter.substr(start)));
+        (session ? usage.used[ai::FiveHours] : usage.used[ai::Week]) = std::min(100, std::stoi(meter.substr(start)));
         auto reset = ParseClaudeReset(title, now);
         if (!reset && i + 2 < rows.size()) {
             const auto& detail = rows[i + 2];
@@ -553,45 +677,12 @@ std::wstring ClaudeTrustWorkspace(bool enable) {
 }
 
 const wchar_t* Name(Provider provider) {
-    return provider == Provider::Claude ? L"Claude" : L"Codex";
-}
-
-std::wstring Format(const Usage& usage) {
-    auto percent = [](int value) {
-        return value >= 0 ? std::to_wstring(value) + L"%" : std::wstring(L"\u2014");
-    };
-    return L"5h " + percent(usage.fiveHours) + L"  7d " + percent(usage.week);
-}
-
-std::wstring FormatResets(const Usage& usage) {
-    std::wstring text;
-    for (size_t i = 0; i < usage.resetsAt.size(); ++i) {
-        const time_t reset = usage.resetsAt[i];
-        std::tm local{};
-        if (reset <= 0 || localtime_s(&local, &reset) != 0) continue;
-
-        if (!text.empty()) text += L", ";
-        wchar_t time[6];
-        if (i == 0) {
-            std::wcsftime(time, ARRAYSIZE(time), L"%H:%M", &local);
-            text += L"5h ";
-        } else {
-            std::wcsftime(time, ARRAYSIZE(time), L"%Hh", &local);
-            text += L"7d ";
-            SYSTEMTIME date{};
-            date.wYear = local.tm_year + 1900;
-            date.wMonth = local.tm_mon + 1;
-            date.wDay = local.tm_mday;
-            wchar_t weekday[64];
-            if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &date, L"dddd",
-                                weekday, ARRAYSIZE(weekday), nullptr)) {
-                text += weekday;
-                text += L" ";
-            }
-        }
-        text += time;
+    switch (provider) {
+        case Provider::Claude: return L"Claude";
+        case Provider::Codex: return L"Codex";
+        case Provider::Gemini: return L"Gemini";
     }
-    return text;
+    return L"";
 }
 
 bool IsInstalled(Provider provider) {
@@ -600,6 +691,7 @@ bool IsInstalled(Provider provider) {
 }
 
 Reading Poll(Provider provider, HANDLE stop) {
+    if (provider == Provider::Gemini) return ReadGemini(FindCli(provider), stop);
     auto read = [&](const std::wstring& exe) {
         if (exe.empty()) return Reading{};
         Reading reading{{}, Connection::Unavailable};
@@ -628,7 +720,7 @@ bool OpenClaudeSetup() {
     auto dir = ClaudeWorkDir();
     if (exe.empty() || dir.empty()) return false;
     auto args = L"\"" + exe + L"\"" + ClaudeArgs();
-    auto env = ClaudeEnvironment();
+    auto env = CliEnvironment(true);
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION info{};
     if (!CreateProcessW(exe.c_str(), args.data(), nullptr, nullptr, FALSE,
