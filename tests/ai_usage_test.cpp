@@ -40,6 +40,16 @@ int main() {
     CHECK(usage.fiveHours == 13 && usage.week == -1);
     CHECK(ai::Format(usage) == L"5h 13%  7d \u2014");
     CHECK(ai::Format({75, 34, true}) == L"5h 75%  7d 34%");
+    CHECK(ai::FormatResets(usage).empty());
+    const time_t sampleReset = 1795120000;
+    std::tm local{};
+    CHECK(localtime_s(&local, &sampleReset) == 0);
+    wchar_t expectedTime[6];
+    CHECK(std::wcsftime(expectedTime, ARRAYSIZE(expectedTime), L"%H:%M", &local) == 5);
+    CHECK(ai::FormatResets({0, -1, true, {sampleReset, 0}}) == std::wstring(L"5h ") + expectedTime);
+    const auto weeklyReset = ai::FormatResets({-1, 0, true, {0, sampleReset}});
+    CHECK(weeklyReset.size() > 6 && weeklyReset.substr(0, 3) == L"7d ");
+    CHECK(weeklyReset.substr(weeklyReset.size() - 3) == std::wstring(expectedTime, 2) + L"h");
     CHECK(ai::ClaudeStartupState(ai::TerminalRows("Starting Claude Code")) == ai::ClaudeStartup::Waiting);
     CHECK(ai::ClaudeStartupState(ai::TerminalRows("  $  ")) == ai::ClaudeStartup::Ready);
     CHECK(ai::ClaudeStartupState(ai::TerminalRows("Quick safety check\r\n  $  ")) == ai::ClaudeStartup::NeedsSetup);
@@ -79,6 +89,8 @@ int main() {
     CHECK(display.Apply({{0, -1, true, {reset + 18000, 0}}, now + 6, ai::UsageSource::Live}));
     CHECK(!display.Apply({{-1, -1, true}, now + 7}));
     CHECK(display.value.fiveHours == 0 && display.value.week == 45);
+    CHECK(display.Apply({{0, -1, true, {reset + 36000, 0}}, now + 8, ai::UsageSource::Live}));
+    CHECK(display.value.resetsAt[0] == reset + 36000);
 
     ai::UsageState startup;
     const auto history = ai::UsageSource::LastKnown;

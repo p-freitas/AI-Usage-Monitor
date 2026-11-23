@@ -56,6 +56,7 @@ int ConfigureClaudeTrust(bool enable);
 
 const wchar_t* Name(Provider provider);
 std::wstring Format(const Usage& usage);
+std::wstring FormatResets(const Usage& usage);
 bool IsInstalled(Provider provider);
 Reading Poll(Provider provider, HANDLE stop = nullptr);
 bool OpenClaudeSetup();

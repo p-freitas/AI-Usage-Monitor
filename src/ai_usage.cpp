@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <cwchar>
 #include <string_view>
 #include <vector>
@@ -496,6 +497,37 @@ std::wstring Format(const Usage& usage) {
         return value >= 0 ? std::to_wstring(value) + L"%" : std::wstring(L"\u2014");
     };
     return L"5h " + percent(usage.fiveHours) + L"  7d " + percent(usage.week);
+}
+
+std::wstring FormatResets(const Usage& usage) {
+    std::wstring text;
+    for (size_t i = 0; i < usage.resetsAt.size(); ++i) {
+        const time_t reset = usage.resetsAt[i];
+        std::tm local{};
+        if (reset <= 0 || localtime_s(&local, &reset) != 0) continue;
+
+        if (!text.empty()) text += L", ";
+        wchar_t time[6];
+        if (i == 0) {
+            std::wcsftime(time, ARRAYSIZE(time), L"%H:%M", &local);
+            text += L"5h ";
+        } else {
+            std::wcsftime(time, ARRAYSIZE(time), L"%Hh", &local);
+            text += L"7d ";
+            SYSTEMTIME date{};
+            date.wYear = local.tm_year + 1900;
+            date.wMonth = local.tm_mon + 1;
+            date.wDay = local.tm_mday;
+            wchar_t weekday[64];
+            if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &date, L"dddd",
+                                weekday, ARRAYSIZE(weekday), nullptr)) {
+                text += weekday;
+                text += L" ";
+            }
+        }
+        text += time;
+    }
+    return text;
 }
 
 bool IsInstalled(Provider provider) {

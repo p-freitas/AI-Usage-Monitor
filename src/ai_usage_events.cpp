@@ -284,7 +284,7 @@ bool UsageState::Apply(const UsageUpdate& update) {
         }
         observed_[i] = update.observed;
         if (reset > 0) value.resetsAt[i] = reset;
-        changed |= *shown[i] != next || lastKnown_[i] != fromHistory;
+        changed |= *shown[i] != next || lastKnown_[i] != fromHistory || value.resetsAt[i] != previousReset;
         lastKnown_[i] = fromHistory;
         *shown[i] = next;
     }

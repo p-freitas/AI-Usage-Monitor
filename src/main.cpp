@@ -172,6 +172,13 @@ std::wstring UsageTip(const UsageEntry& entry) {
     return line;
 }
 
+std::wstring HoverTip(const UsageEntry& entry) {
+    auto tip = UsageTip(entry);
+    auto resets = ai::FormatResets(entry.quota.value);
+    if (!resets.empty()) tip += L"\nResets: " + resets;
+    return tip;
+}
+
 void ApplyUsage(UsageEntry& entry) {
     bool visible = entry.quota.value.installed && !g_useWidget && !IsHidden(entry.key);
     if (!visible) {
@@ -181,7 +188,7 @@ void ApplyUsage(UsageEntry& entry) {
     }
     HICON icon = LoadIconW(g_inst, MAKEINTRESOURCEW(entry.resource));
     if (icon) {
-        TrayCall(entry.added ? NIM_MODIFY : NIM_ADD, entry.uid, icon, UsageTip(entry));
+        TrayCall(entry.added ? NIM_MODIFY : NIM_ADD, entry.uid, icon, HoverTip(entry));
         entry.added = true;
     }
 }
@@ -214,7 +221,7 @@ void UpdateWidget() {
         item.dim = !entry.quota.value.Available() || entry.quota.LastKnown();
         items.push_back(std::move(item));
         if (!tip.empty()) tip += L"\n";
-        tip += UsageTip(entry);
+        tip += HoverTip(entry);
     }
     if (tip.empty()) tip = L"AI Usage Monitor";
     widget::SetItems(items, tip);

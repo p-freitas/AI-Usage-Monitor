@@ -387,7 +387,7 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
         ti.hwnd = notifyWnd;
         ti.uId = (UINT_PTR)g_wnd;
-        ti.lpszText = const_cast<wchar_t*>(L"AI Usage Monitor");
+        ti.lpszText = const_cast<wchar_t*>(g_tipText.empty() ? L"AI Usage Monitor" : g_tipText.c_str());
         SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
         SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
     }
@@ -423,6 +423,7 @@ void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip)
     if (tooltip != g_tipText && g_tip) {
         g_tipText = tooltip;
         TTTOOLINFOW ti{ sizeof(ti) };
+        ti.uFlags = TTF_IDISHWND;
         ti.hwnd = g_notify;
         ti.uId = (UINT_PTR)g_wnd;
         ti.lpszText = const_cast<wchar_t*>(g_tipText.c_str());
