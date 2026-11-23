@@ -55,6 +55,14 @@ Hover over the widget to see each quota with its percentage, progress bar and lo
 
 **Warnings** lets you select the amber and red thresholds (defaults 80% and 90%), switch warning colors off, or enable Windows notifications. An exhausted limit also shows **100%!**. Notifications start disabled and use the first fresh reading as their baseline. Preferences take effect immediately and persist for the current Windows user.
 
+#### Minimal taskbar layout
+
+Choose **Settings → Display → Taskbar display → Minimal** to save space on the Windows taskbar. The widget removes the **5h** and **7d** labels. When both percentages are visible, the 5-hour limit comes first and the 7-day limit comes second. The separate Argon weekly quota still appears as **A** when available.
+
+![Minimal layout showing Claude, Codex and Gemini usage beside the Windows network and volume icons](docs/images/windows-taskbar-minimal.png)
+
+Warning colors still apply. Click the widget to see the full quota labels and reset times.
+
 ## Program updates
 
 Official Windows builds check GitHub for a newer stable release shortly after startup and then about once a day. Settings shows an available version and offers **Check for program updates** and **Automatically check for program updates**. Select **Download and install** to approve installation. The monitor verifies the publisher's release signature and the installer's SHA-256 before running it. An in-place update keeps the current settings and reopens the monitor.
