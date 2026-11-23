@@ -11,6 +11,7 @@ enum class Severity { Normal, Warning, Critical, Exhausted };
 struct Preferences {
     Display display = Display::Complete;
     Reset reset = Reset::Relative;
+    bool hoverTooltip = true;
     bool colors = true;
     int warning = 80;
     int critical = 90;
@@ -38,6 +39,7 @@ struct ProviderView {
     std::vector<Row> rows;
     std::vector<Segment> strip;
     std::wstring status;
+    bool refreshing = false;
 };
 
 Severity Level(int used, const Preferences& prefs);

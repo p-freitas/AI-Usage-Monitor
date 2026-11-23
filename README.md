@@ -45,11 +45,13 @@ Settings lists all three providers even before any usage is available. It tells 
 
 Click the widget or a notification-area icon to open the usage panel. It stays open as you move the pointer and closes when you click outside it. The header has buttons to refresh quotas, open Settings over the panel or exit the monitor. Use the provider checkboxes to show or hide each provider. **Taskbar display** selects Complete, Minimal or Weekly only. Gemini uses **A** for the independent Argon weekly quota. A limit missing from the Antigravity report has no indicator. If the widget cannot fit between the taskbar edge and its neighbors, the monitor falls back to tray icons.
 
+During a manual refresh, each provider card shows placeholders and **Refreshing…** until its quota check finishes.
+
 ![AI Usage Monitor usage panel showing Claude, Codex and Gemini limits and reset times](docs/images/usage-monitor.png)
 
 <img src="docs/images/settings.png" width="460" alt="AI Usage Monitor settings with provider, display, reset time and warning controls">
 
-Hover over the widget to see each quota with its percentage, progress bar and local reset time. **Reset time format** offers Relative (default), Absolute or Both. A dimmed value marked **Last known** comes from a cached reading or an account check that could not refresh it. When a known reset passes, that reading expires until the next update. The tray uses the standard Windows text tooltip.
+Hover over the widget to see each quota with its percentage, progress bar and local reset time. Turn off **Show tooltip on hover** in **Settings → Display** to hide hover tooltips on the widget and in the notification area. **Reset time format** offers Relative (default), Absolute or Both. A dimmed value marked **Last known** comes from a cached reading or an account check that could not refresh it. When a known reset passes, that reading expires until the next update. The tray uses the standard Windows text tooltip.
 
 **Warnings** lets you select the amber and red thresholds (defaults 80% and 90%), switch warning colors off, or enable Windows notifications. An exhausted limit also shows **100%!**. Notifications start disabled and use the first fresh reading as their baseline. Preferences take effect immediately and persist for the current Windows user.
 

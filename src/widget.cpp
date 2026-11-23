@@ -361,7 +361,8 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSEMOVE:
             if (!g_hover) {
                 g_hover = true;
-                TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE | TME_HOVER, h, HOVER_DEFAULT };
+                TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, HOVER_DEFAULT };
+                if (g_prefs.hoverTooltip) t.dwFlags |= TME_HOVER;
                 TrackMouseEvent(&t);
                 Paint();
                 widget::Reposition();

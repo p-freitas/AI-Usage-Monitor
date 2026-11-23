@@ -26,8 +26,16 @@ HFONT font, heading, title, symbols, value, glyphs;
 constexpr wchar_t className[] = L"AIUsageMonitorQuotaTip";
 int Px(int n) { return MulDiv(n, scale, 96); }
 
+bool ShowCard(const ui::ProviderView& provider, bool pin) {
+    return pin || !provider.rows.empty();
+}
+
+int CardRows(const ui::ProviderView& provider, bool pin) {
+    return std::max(pin && provider.refreshing ? 1 : 0, static_cast<int>(provider.rows.size()));
+}
+
 int CardHeight(const ui::ProviderView& provider) {
-    return Px(cardHeading) + static_cast<int>(provider.rows.size())*Px(rowHeight) + Px(cardBottom) +
+    return Px(cardHeading) + CardRows(provider, pinned)*Px(rowHeight) + Px(cardBottom) +
            (provider.status.empty() ? 0 : Px(statusHeight));
 }
 
@@ -75,8 +83,10 @@ void Draw(HDC dc, RECT client) {
              L"Usage limits", title, colors.text);
     int left = Px(padding), right = client.right-left;
     int y = panelTop+Px(headerHeight)+left;
+    const int contentTop = y;
     auto now = std::time(nullptr);
     for (const auto& provider : *views) {
+        if (!ShowCard(provider, pinned)) continue;
         auto accent = Accent(provider.provider);
         auto tintStart = ui::Mix(colors.background, accent, lightTheme ? 12 : 17);
         auto tintEnd = ui::Mix(colors.background, accent, lightTheme ? 3 : 5);
@@ -87,6 +97,22 @@ void Draw(HDC dc, RECT client) {
         ui::Text(dc, {left+Px(34), y+Px(2), right-Px(10), y+Px(cardHeading)},
                  ai::Name(provider.provider), value, colors.text);
         y += Px(cardHeading);
+
+        if (pinned && provider.refreshing) {
+            ui::Text(dc, {left+Px(125),y-Px(cardHeading),right-Px(10),y},
+                     L"Refreshing...", font, colors.muted, DT_RIGHT);
+            const auto placeholder = ui::Mix(tintEnd, colors.muted, lightTheme ? 22 : 28);
+            const int labelX = left+Px(10), numberX = left+Px(105), barX = left+Px(165);
+            for (int i = 0; i < CardRows(provider, pinned); ++i) {
+                ui::Rounded(dc, {labelX,y+Px(5),numberX-Px(12),y+Px(19)}, Px(4), placeholder, placeholder);
+                ui::Rounded(dc, {numberX,y+Px(6),barX-Px(18),y+Px(16)}, Px(4), placeholder, placeholder);
+                ui::Rounded(dc, {barX,y+Px(8),right-Px(10),y+Px(14)}, Px(3), placeholder, placeholder);
+                ui::Rounded(dc, {numberX,y+Px(23),numberX+Px(121),y+Px(29)}, Px(3), placeholder, placeholder);
+                y += Px(rowHeight);
+            }
+            y = bottom+left;
+            continue;
+        }
 
         // Columns follow the content of this card, so long labels such as "Gemini · 7 days"
         // push the values right instead of being clipped.
@@ -135,7 +161,7 @@ void Draw(HDC dc, RECT client) {
             ui::Text(dc, {left+Px(10),y,right-Px(10),y+Px(statusHeight)}, provider.status, font, colors.muted);
         y = bottom+left;
     }
-    if (views->empty())
+    if (y == contentTop)
         ui::Text(dc, {left,y,right,y+Px(20)}, L"No visible quota readings", font, colors.muted);
 }
 
@@ -164,15 +190,18 @@ LRESULT CALLBACK TipProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             // No capture or hook: the original click still goes to the window underneath.
             RAWINPUT input{};
             UINT size = sizeof(input);
-            if (!inSettings && GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &input,
-                                               &size, sizeof(RAWINPUTHEADER)) == sizeof(input) &&
+            if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT, &input,
+                                &size, sizeof(RAWINPUTHEADER)) == sizeof(input) &&
                 input.header.dwType == RIM_TYPEMOUSE &&
                 (input.data.mouse.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_DOWN |
                     RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_BUTTON_4_DOWN | RI_MOUSE_BUTTON_5_DOWN))) {
                 DWORD pos = GetMessagePos();
                 POINT pt{static_cast<short>(LOWORD(pos)), static_cast<short>(HIWORD(pos))};
                 HWND target = WindowFromPoint(pt);
-                if (target != h && !IsChild(h, target)) PostMessageW(h, WM_CLOSE, 0, 0);
+                if (inSettings)
+                    SendMessageW(GetWindow(h, GW_OWNER), WM_USAGE_SETTINGS_CLICK, reinterpret_cast<WPARAM>(target), 0);
+                else if (target != h && !IsChild(h, target))
+                    PostMessageW(h, WM_CLOSE, 0, 0);
             }
             break;
         }
@@ -199,7 +228,7 @@ LRESULT CALLBACK TipProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (LOWORD(wp) == gearId && pinned && !inSettings) {
                 inSettings = true;
-                SendMessageW(GetWindow(h, GW_OWNER), WM_USAGE_SETTINGS, reinterpret_cast<WPARAM>(h), 0);
+                SendMessageW(GetWindow(h, GW_OWNER), WM_USAGE_SETTINGS, reinterpret_cast<WPARAM>(h), mouseRegistered);
                 inSettings = false;
             }
             return 0;
@@ -216,10 +245,11 @@ LRESULT CALLBACK TipProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             int saved = SaveDC(dc);
             auto colors = ui::Colors(lightTheme);
             bool pressed = (item->itemState & ODS_SELECTED) != 0;
+            bool disabled = (item->itemState & ODS_DISABLED) != 0;
             ui::Fill(dc, item->rcItem, colors.header);
             auto face = pressed ? colors.selected : ui::Mix(colors.header, colors.surface, 60);
             ui::Rounded(dc, item->rcItem, Px(8), face, ui::Mix(colors.border, colors.text, lightTheme ? 0 : 12));
-            ui::Text(dc, item->rcItem, icon, symbols, colors.text, DT_CENTER);
+            ui::Text(dc, item->rcItem, icon, symbols, disabled ? colors.muted : colors.text, DT_CENTER);
             if ((item->itemState & ODS_FOCUS) && !(item->itemState & ODS_NOFOCUSRECT)) {
                 auto focus = item->rcItem;
                 InflateRect(&focus, -3, -3);
@@ -279,6 +309,10 @@ COLORREF UsageColor(ui::Severity level, bool light, COLORREF normal) {
 
 void ShowUsageTip(HWND owner, const RECT& bounds, int dpi, bool light,
                   const std::vector<ui::ProviderView>& providers, const ui::Preferences& prefs, bool pin) {
+    if (!pin && !prefs.hoverTooltip) {
+        HideHoverTip();
+        return;
+    }
     MONITORINFO monitor{sizeof(monitor)};
     if (!GetMonitorInfoW(MonitorFromRect(&bounds, MONITOR_DEFAULTTONEAREST), &monitor)) return;
     if (tip && pinned && !pin) return;
@@ -286,10 +320,15 @@ void ShowUsageTip(HWND owner, const RECT& bounds, int dpi, bool light,
     anchorBounds = bounds;
     anchorDpi = dpi;
     int logicalHeight = headerHeight+2*padding+(pin ? 9 : 0);
-    if (providers.empty()) logicalHeight += 20;
-    for (const auto& provider : providers)
-        logicalHeight += cardHeading + rowHeight*static_cast<int>(provider.rows.size()) + cardBottom +
+    const bool empty = std::none_of(providers.begin(), providers.end(), [pin](const auto& provider) {
+        return ShowCard(provider, pin);
+    });
+    if (empty) logicalHeight += 20;
+    for (const auto& provider : providers) {
+        if (!ShowCard(provider, pin)) continue;
+        logicalHeight += cardHeading + rowHeight*CardRows(provider, pin) + cardBottom +
                          padding + (provider.status.empty() ? 0 : statusHeight);
+    }
     const RECT& area = monitor.rcWork;
     const int heightBudget = std::max<int>(1, area.bottom-area.top-12);
     const int widthBudget = std::max<int>(1, area.right-area.left-2);
@@ -350,13 +389,21 @@ void ShowUsageTip(HWND owner, const RECT& bounds, int dpi, bool light,
     std::wstring description;
     int height = Px(headerHeight)+2*Px(padding)+(pin ? Px(9) : 0);
     bool countdown = false;
+    bool refreshing = false;
     for (const auto& provider : providers) {
+        if (!ShowCard(provider, pin)) continue;
         height += CardHeight(provider)+Px(padding);
         if (!description.empty()) description += L"\n";
-        description += ui::PlainText(provider, prefs.reset, now);
+        if (pin && provider.refreshing) {
+            description += ai::Name(provider.provider);
+            description += L" - Refreshing...";
+            refreshing = true;
+        } else {
+            description += ui::PlainText(provider, prefs.reset, now);
+        }
         for (const auto& row : provider.rows) countdown |= row.reset > now;
     }
-    if (providers.empty()) { height += Px(20); description = L"No visible quota readings"; }
+    if (empty) { height += Px(20); description = L"No visible quota readings"; }
     SetWindowTextW(tip, description.c_str());
     int width = std::min<int>(Px(panelWidth), area.right-area.left);
     height = std::min<int>(height + 2, area.bottom-area.top);
@@ -369,6 +416,10 @@ void ShowUsageTip(HWND owner, const RECT& bounds, int dpi, bool light,
     SetWindowPos(tip, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     Shape(tip, width, height);
     if (pin) {
+        if (refresh) {
+            EnableWindow(refresh, !refreshing);
+            SetWindowTextW(refresh, refreshing ? L"Refreshing usage" : L"Refresh now");
+        }
         int buttonTop = Px(6)+(!tailBelow ? Px(9) : 0);
         int fromRight = 36;
         for (auto button : {exitButton, gear, refresh}) {

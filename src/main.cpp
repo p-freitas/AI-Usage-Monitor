@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <string>
 #include <vector>
 #include <ctime>
@@ -57,6 +58,8 @@ struct UsageEntry {
     bool added = false;
     HANDLE refresh = nullptr;
     HANDLE worker = nullptr;
+    std::atomic<unsigned> requestedRefresh{0};
+    unsigned pendingRefresh = 0; // UI thread only
     ai::Connection connection = ai::Connection::Missing;
     ULONGLONG connectionObserved = 0;
     std::array<ui::Crossing, ai::LimitCount> crossings{};
@@ -99,6 +102,7 @@ void SaveBoolSetting(const wchar_t* name, bool on) { SaveSetting(name, on); }
 void LoadPreferences() {
     g_prefs.display = static_cast<ui::Display>(LoadSetting(L"DisplayMode", 0));
     g_prefs.reset = static_cast<ui::Reset>(LoadSetting(L"ResetFormat", 0));
+    g_prefs.hoverTooltip = LoadBoolSetting(L"HoverTooltip", true);
     g_prefs.colors = LoadBoolSetting(L"WarningColors", true);
     g_prefs.notifications = LoadBoolSetting(L"UsageNotifications", false);
     g_prefs.warning = LoadSetting(L"WarningThreshold", 80);
@@ -141,10 +145,13 @@ void TrayCall(DWORD msg, UINT uid, HICON icon, const std::wstring& tip) {
     NOTIFYICONDATAW nid{ sizeof(nid) };
     nid.hWnd = g_hwnd;
     nid.uID = uid;
-    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon = icon;
-    CopyTip(nid.szTip, ARRAYSIZE(nid.szTip), tip);
+    if (g_prefs.hoverTooltip) {
+        nid.uFlags |= NIF_SHOWTIP;
+        CopyTip(nid.szTip, ARRAYSIZE(nid.szTip), tip);
+    }
     Shell_NotifyIconW(msg, &nid);
     if (msg == NIM_ADD) {
         nid.uVersion = NOTIFYICON_VERSION_4;
@@ -197,7 +204,8 @@ void ApplyUsage(UsageEntry& entry) {
     if (icon) {
         auto now = std::time(nullptr);
         entry.trayTipMinute = now / 60;
-        TrayCall(entry.added ? NIM_MODIFY : NIM_ADD, entry.uid, icon, ui::TrayText(View(entry), g_prefs.reset, now));
+        auto tip = g_prefs.hoverTooltip ? ui::TrayText(View(entry), g_prefs.reset, now) : std::wstring{};
+        TrayCall(entry.added ? NIM_MODIFY : NIM_ADD, entry.uid, icon, tip);
         entry.added = true;
     }
 }
@@ -224,7 +232,15 @@ void UpdateWidget(bool opening = false) {
     if (!opening && !widget::Alive() && !widget::UsageTipOpen()) return;
     std::vector<ui::ProviderView> items;
     for (const auto& entry : g_usage) {
-        if (entry.quota.value.Available() && !IsHidden(entry.key)) items.push_back(View(entry));
+        const bool hasReading = entry.quota.value.Available();
+        if (IsHidden(entry.key) || (!hasReading && !entry.quota.value.installed && !entry.pendingRefresh)) continue;
+        auto view = View(entry);
+        view.refreshing = entry.pendingRefresh != 0;
+        if (!hasReading) {
+            view.rows.clear();
+            view.strip.clear();
+        }
+        items.push_back(std::move(view));
     }
     widget::SetItems(std::move(items), g_prefs);
 }
@@ -294,12 +310,26 @@ void StartWorker(UsageEntry& entry) {
     if (entry.refresh) entry.worker = CreateThread(nullptr, 0, UsageWorker, &entry, 0, nullptr);
 }
 
-void RefreshUsage() {
+void RefreshUsage(bool manual = false) {
+    if (manual && std::any_of(g_usage.begin(), g_usage.end(), [](const auto& entry) {
+        return entry.pendingRefresh != 0;
+    })) return;
+    bool repaint = false;
     for (auto& entry : g_usage) {
-        if (IsHidden(entry.key)) continue;
-        if (entry.worker) SetEvent(entry.refresh);
-        else if (entry.provider != ai::Provider::Gemini || ai::IsInstalled(entry.provider)) StartWorker(entry);
+        if (IsHidden(entry.key) || entry.pendingRefresh) continue;
+        if (manual) {
+            if (!entry.quota.value.installed && !ai::IsInstalled(entry.provider)) continue;
+            entry.pendingRefresh = ++entry.requestedRefresh;
+        }
+        if (entry.worker) {
+            if (!SetEvent(entry.refresh)) entry.pendingRefresh = 0;
+        } else if (manual || entry.provider != ai::Provider::Gemini || ai::IsInstalled(entry.provider)) {
+            StartWorker(entry);
+            if (!entry.worker) entry.pendingRefresh = 0;
+        }
+        repaint |= entry.pendingRefresh != 0;
     }
+    if (repaint) UpdateWidget();
 }
 
 
@@ -310,6 +340,12 @@ bool SetPreference(UINT cmd) {
     } else if (cmd >= ID_RESET && cmd < ID_RESET+3) {
         g_prefs.reset = static_cast<ui::Reset>(cmd-ID_RESET);
         SaveSetting(L"ResetFormat", cmd-ID_RESET);
+    } else if (cmd == ID_HOVER_TOOLTIP) {
+        g_prefs.hoverTooltip = !g_prefs.hoverTooltip;
+        SaveSetting(L"HoverTooltip", g_prefs.hoverTooltip);
+        auto icon = LoadIconW(g_inst, MAKEINTRESOURCEW(IDI_APP));
+        if (g_placeholder) TrayCall(NIM_MODIFY, PLACEHOLDER_ID, icon, kAppName);
+        if (g_balloonIcon) TrayCall(NIM_MODIFY, BALLOON_ID, icon, kAppName);
     } else if (cmd == ID_COLORS) {
         g_prefs.colors = !g_prefs.colors;
         SaveSetting(L"WarningColors", g_prefs.colors);
@@ -337,7 +373,7 @@ bool SetPreference(UINT cmd) {
 void ApplyCommand(UINT cmd) {
     if (SetPreference(cmd)) return;
     switch (cmd) {
-        case ID_REFRESH: RefreshUsage(); break;
+        case ID_REFRESH: RefreshUsage(true); break;
         case ID_APP_UPDATE: updates::Activate(g_settingsDialog); break;
         case ID_AUTO_UPDATE: updates::ToggleAutomatic(); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
@@ -354,6 +390,8 @@ void ApplyCommand(UINT cmd) {
                 if (!IsHidden(entry.key)) {
                     if (entry.worker) SetEvent(entry.refresh);
                     else StartWorker(entry);
+                } else {
+                    entry.pendingRefresh = 0;
                 }
                 ApplyUsage(entry);
                 UpdatePlaceholder();
@@ -407,9 +445,9 @@ RECT DialogRect(HWND dlg, RECT units) {
 int DialogPx(HWND dlg, int px) { return MulDiv(px, GetDpiForWindow(dlg), 96); }
 
 // Layout in dialog units; keep in sync with IDD_SETTINGS in res/app.rc.
-constexpr int kSettingsWidth = 278, kSettingsHeight = 422, kSettingsHeader = 26;
-constexpr int kSettingsRules[] = {115, 191, 253, 346, 386};
-constexpr RECT kProvidersCard{13,53,265,109}, kResetGroup{13,219,265,247};
+constexpr int kSettingsWidth = 278, kSettingsHeight = 438, kSettingsHeader = 26;
+constexpr int kSettingsRules[] = {115, 207, 269, 362, 402};
+constexpr RECT kProvidersCard{13,53,265,109}, kResetGroup{13,235,265,263};
 
 COLORREF LinkColor(const ui::Palette& colors) {
     return g_lightTaskbar ? colors.accent : ui::Mix(colors.accent, RGB(255,255,255), 32);
@@ -437,7 +475,7 @@ void PaintSettings(HWND dlg, HDC dc) {
     ui::Rounded(dc, DialogRect(dlg, kResetGroup), DialogPx(dlg,10), colors.surface, colors.border);
     // Severity dots in front of the threshold labels.
     auto dot = [&](int x, COLORREF color) {
-        auto anchor = DialogRect(dlg, {x,304,x,304});
+        auto anchor = DialogRect(dlg, {x,320,x,320});
         int r = DialogPx(dlg,4);
         ui::Rounded(dc, {anchor.left-r,anchor.top-r,anchor.left+r,anchor.top+r}, r, color, color);
     };
@@ -540,8 +578,10 @@ void DrawSettingsButton(HWND dlg, const DRAWITEMSTRUCT& item) {
         DrawCheckBox(dc, box, g_prefs.notifications, px(4), colors, g_settingsSymbols);
         r.left += px(26);
         IconLabel(dc, r, ui::glyph::Bell, ControlText(item.hwndItem), font, colors.muted, ink, false, px(8));
-    } else if (id == ID_COLORS || id == ID_WIDGET_BACKGROUND || id == ID_AUTOSTART || id == ID_AUTO_UPDATE) {
+    } else if (id == ID_COLORS || id == ID_WIDGET_BACKGROUND || id == ID_HOVER_TOOLTIP ||
+               id == ID_AUTOSTART || id == ID_AUTO_UPDATE) {
         bool on = id == ID_COLORS ? g_prefs.colors : id == ID_WIDGET_BACKGROUND ? g_widgetBackground :
+                  id == ID_HOVER_TOOLTIP ? g_prefs.hoverTooltip :
                   id == ID_AUTOSTART ? AutostartEnabled() : updates::AutomaticEnabled();
         RECT track{0,(r.top+r.bottom-px(18))/2,px(32),(r.top+r.bottom+px(18))/2};
         bool lit = on && !disabled;
@@ -641,6 +681,7 @@ LRESULT CALLBACK SettingsCombo(HWND box, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
 INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_INITDIALOG) {
         g_settingsDialog = dlg;
+        SetWindowLongPtrW(dlg, DWLP_USER, lp);
         g_settingsScroll = 0;
         auto colors = ui::Colors(g_lightTaskbar);
         g_settingsBackground = CreateSolidBrush(colors.background);
@@ -689,6 +730,20 @@ INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
                 if (region && !SetWindowRgn(dlg, region, TRUE)) DeleteObject(region);
             }
         }
+        return TRUE;
+    }
+    if (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE && !GetWindowLongPtrW(dlg, DWLP_USER))
+        PostMessageW(dlg, widget::WM_USAGE_SETTINGS_CLICK, static_cast<WPARAM>(lp), 0);
+    if (msg == widget::WM_USAGE_SETTINGS_CLICK) {
+        HWND target = reinterpret_cast<HWND>(wp);
+        if (target == dlg || IsChild(dlg, target)) return TRUE;
+        // A native dropdown list is a separate window from the dialog's child controls.
+        for (auto id : settingsCombos) {
+            COMBOBOXINFO info{sizeof(info)};
+            if (GetComboBoxInfo(GetDlgItem(dlg, id), &info) && IsWindowVisible(info.hwndList) &&
+                (target == info.hwndList || IsChild(info.hwndList, target))) return TRUE;
+        }
+        PostMessageW(dlg, WM_CLOSE, 0, 0);
         return TRUE;
     }
     if (msg == WM_PAINT || msg == WM_PRINTCLIENT) {
@@ -804,8 +859,13 @@ void OpenPanel(const RECT& bounds, HWND dpiWindow) {
     widget::OpenPanel(g_hwnd, bounds, dpi ? dpi : 96, g_lightTaskbar);
 }
 
-void PublishUsage(size_t provider, const ai::UsageUpdate& reading) {
-    auto* update = new ai::UsageUpdate(reading);
+struct PublishedUsage {
+    ai::UsageUpdate reading;
+    unsigned refresh;
+};
+
+void PublishUsage(size_t provider, const ai::UsageUpdate& reading, unsigned refresh = 0) {
+    auto* update = new PublishedUsage{reading, refresh};
     if (!PostMessageW(g_hwnd, WM_USAGE_RESULTS, provider, reinterpret_cast<LPARAM>(update)))
         delete update;
 }
@@ -864,8 +924,10 @@ void ExpireReadings() {
     UpdateWidget();
 }
 
-void ShowUsageUpdate(size_t provider, const ai::UsageUpdate& update) {
+void ShowUsageUpdate(size_t provider, const ai::UsageUpdate& update, unsigned refresh = 0) {
     auto& entry = g_usage[provider];
+    const bool finishedRefresh = refresh && entry.pendingRefresh == refresh;
+    if (finishedRefresh) entry.pendingRefresh = 0;
     bool changed = entry.quota.Apply(update);
     if (update.source != ai::UsageSource::LastKnown && update.observed >= entry.connectionObserved) {
         auto state = update.usage.Available() ? ai::Connection::Ready : update.connection;
@@ -875,7 +937,10 @@ void ShowUsageUpdate(size_t provider, const ai::UsageUpdate& update) {
         entry.connection = state;
         entry.connectionObserved = update.observed;
     }
-    if (!changed) return;
+    if (!changed) {
+        if (finishedRefresh) UpdateWidget();
+        return;
+    }
     ScheduleExpiry();
     if (g_nextReset && g_nextReset <= std::time(nullptr)) ExpireReadings();
     NotifyCrossings(entry, update);
@@ -902,8 +967,10 @@ DWORD WINAPI UsageWorker(LPVOID context) {
         }
         ULONGLONG start = GetTickCount64();
         const auto observed = ai::Now();
+        // A result already in flight when the button is clicked belongs to an older request.
+        const auto refresh = entry.requestedRefresh.load();
         auto reading = ai::Poll(entry.provider, g_stopEvt);
-        PublishUsage(index, {reading.usage, observed, ai::UsageSource::Account, reading.connection});
+        PublishUsage(index, {reading.usage, observed, ai::UsageSource::Account, reading.connection}, refresh);
         if (reading.usage.Available()) startupAttempts = ARRAYSIZE(codexRetryDelays);
         const auto elapsed = GetTickCount64() - start;
         DWORD delay = elapsed < USAGE_INTERVAL_MS ? USAGE_INTERVAL_MS - (DWORD)elapsed : 0;
@@ -929,8 +996,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
         case WM_USAGE_RESULTS: {
-            auto* update = reinterpret_cast<ai::UsageUpdate*>(lp);
-            ShowUsageUpdate(wp, *update);
+            auto* update = reinterpret_cast<PublishedUsage*>(lp);
+            ShowUsageUpdate(wp, update->reading, update->refresh);
             delete update;
             return 0;
         }
@@ -954,6 +1021,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     }
                     break;
                 case WM_MOUSEMOVE:
+                    if (!g_prefs.hoverTooltip) break;
                     for (auto& entry : g_usage)
                         if (entry.added && entry.uid == HIWORD(lp) && entry.trayTipMinute != std::time(nullptr)/60)
                             ApplyUsage(entry);
@@ -982,16 +1050,19 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case widget::WM_USAGE_REFRESH:
-            RefreshUsage();
+            RefreshUsage(true);
             return 0;
         case widget::WM_USAGE_SETTINGS: {
             HWND panel = reinterpret_cast<HWND>(wp);
             if (!g_settingsDialog && widget::UsagePanelOpen() && GetWindow(panel, GW_OWNER) == h) {
-                if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SETTINGS), panel, SettingsProc, 0) == ID_EXIT)
+                if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SETTINGS), panel, SettingsProc, lp) == ID_EXIT)
                     PostMessageW(h, WM_CLOSE, 0, 0);
             }
             return 0;
         }
+        case widget::WM_USAGE_SETTINGS_CLICK:
+            if (g_settingsDialog) SendMessageW(g_settingsDialog, msg, wp, 0);
+            return 0;
         case WM_ENDSESSION:  // sign-out / shutdown / installer restart manager
             if (wp) DestroyWindow(h);
             return 0;
@@ -1107,7 +1178,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         DispatchMessageW(&message);
     }
     while (PeekMessageW(&message, nullptr, WM_USAGE_RESULTS, WM_USAGE_RESULTS, PM_REMOVE))
-        delete reinterpret_cast<ai::UsageUpdate*>(message.lParam);
+        delete reinterpret_cast<PublishedUsage*>(message.lParam);
     for (auto& entry : g_usage) {
         if (entry.worker) CloseHandle(entry.worker);
         if (entry.refresh) CloseHandle(entry.refresh);

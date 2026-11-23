@@ -21,14 +21,18 @@ int main() {
     SaveWidgetBackground(true);
     LoadPreferences();
     CHECK(g_prefs.display == ui::Display::Complete && g_prefs.reset == ui::Reset::Relative);
+    CHECK(g_prefs.hoverTooltip);
     CHECK(g_prefs.colors && !g_prefs.notifications && g_prefs.warning == 80 && g_prefs.critical == 90);
     CHECK(SetPreference(ID_DISPLAY+2) && SetPreference(ID_RESET+2));
     CHECK(SetPreference(ID_WARNING+2) && SetPreference(ID_CRITICAL+3));
     CHECK(SetPreference(ID_COLORS) && SetPreference(ID_NOTIFICATIONS));
+    CHECK(SetPreference(ID_HOVER_TOOLTIP) && !g_prefs.hoverTooltip);
     SaveBoolSetting(L"HideGemini", true);
     g_prefs = {};
     LoadPreferences();
     CHECK(g_prefs.display == ui::Display::Weekly && g_prefs.reset == ui::Reset::Both);
+    CHECK(!g_prefs.hoverTooltip);
+    CHECK(SetPreference(ID_HOVER_TOOLTIP) && g_prefs.hoverTooltip);
     CHECK(!g_prefs.colors && g_prefs.notifications && g_prefs.warning == 75 && g_prefs.critical == 95);
     CHECK(IsHidden(L"HideClaude") && IsHidden(L"HideGemini") && !IsHidden(L"HideCodex"));
     CHECK(LoadWidgetBackground() && LoadWidgetMode());
