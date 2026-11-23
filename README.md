@@ -37,7 +37,7 @@ Use your own install path if you chose a different folder. **Copy Claude live up
 - Gemini reads the installed Antigravity CLI's structured quota report. The monitor checks the executable with `--version` before its first query and again when the executable changes. The verified Windows version is **1.5.15**. Other versions are shown in Settings as unverified and receive no quota command. A successful report identifies the built-in usage command and reports zero agent turns and zero tokens. Gemini usage is calculated from each reported remaining fraction. The separate Antigravity Claude/GPT group is ignored. [Official CLI changelog](https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md)
 - Enabled providers use the existing two-minute refresh interval to pick up changes from other devices. The monitor also offers notification-area icons for taskbars that cannot host the widget.
 
-<img src="docs/images/windows-taskbar.png" width="480" alt="Claude, Codex and Gemini quotas in the Windows taskbar widget">
+<img src="docs/images/windows-taskbar.png" width="634" alt="Claude, Codex and Gemini quotas beside the Windows network and volume icons">
 
 ### CLI status in Settings
 
@@ -63,7 +63,7 @@ The signature used by the updater is separate from the Authenticode publisher si
 
 AI Usage Monitor and BatteryHub (formerly Wireless Device Battery Monitor) can run side by side on the Windows taskbar. When both widgets are visible, AI Usage Monitor displays provider usage next to BatteryHub's device battery levels. Both apps have their own settings, tray icons and startup entries. [BatteryHub by krisgfx9](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor)
 
-![AI Usage Monitor taskbar widget next to BatteryHub](docs/images/batteryhub-side-by-side.png)
+![AI Usage Monitor and BatteryHub widgets beside the Windows notification area](docs/images/batteryhub-side-by-side.png)
 
 ## Memory and CPU
 
