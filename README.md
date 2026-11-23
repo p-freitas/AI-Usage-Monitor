@@ -2,7 +2,7 @@
 
 AI Usage Monitor displays the percentage of the **5-hour** and **7-day** subscription limits used by Claude Code, Codex and Google Antigravity in the Windows taskbar. Gemini 4 Argon has its own weekly indicator when the account reports a separate quota.
 
-![AI Usage Monitor usage panel showing Claude, Codex and Gemini limits and reset times](docs/images/usage-monitor.png)
+<img src="docs/images/windows-taskbar.png" width="634" alt="Claude, Codex and Gemini quotas beside the Windows network and volume icons">
 
 **AI Usage Monitor uses zero model tokens.** It reads quota metadata using the installed CLIs and receives updates from your existing sessions. It sends no model prompts and adds no token usage when it refreshes.
 
@@ -37,8 +37,6 @@ Use your own install path if you chose a different folder. **Copy Claude live up
 - Gemini reads the installed Antigravity CLI's structured quota report. The monitor checks the executable with `--version` before its first query and again when the executable changes. The verified Windows version is **1.5.15**. Other versions are shown in Settings as unverified and receive no quota command. A successful report identifies the built-in usage command and reports zero agent turns and zero tokens. Gemini usage is calculated from each reported remaining fraction. The separate Antigravity Claude/GPT group is ignored. [Official CLI changelog](https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md)
 - Enabled providers use the existing two-minute refresh interval to pick up changes from other devices. The monitor also offers notification-area icons for taskbars that cannot host the widget.
 
-<img src="docs/images/windows-taskbar.png" width="634" alt="Claude, Codex and Gemini quotas beside the Windows network and volume icons">
-
 ### CLI status in Settings
 
 Settings lists all three providers even before any usage is available. It tells you whether to install the CLI (or Codex Desktop), sign in, finish Claude Code setup, or wait for the first reading. If a quota check fails, choose **Refresh now** to retry. If you install Antigravity CLI while the monitor is running, sign in through the CLI and choose **Refresh now**. Providers without readings occupy no space in the widget.
@@ -46,6 +44,8 @@ Settings lists all three providers even before any usage is available. It tells 
 ### Display and warnings
 
 Click the widget or a notification-area icon to open the usage panel. It stays open as you move the pointer and closes when you click outside it. The header has buttons to refresh quotas, open Settings over the panel or exit the monitor. Use the provider checkboxes to show or hide each provider. **Taskbar display** selects Complete, Minimal or Weekly only. Gemini uses **A** for the independent Argon weekly quota. A limit missing from the Antigravity report has no indicator. If the widget cannot fit between the taskbar edge and its neighbors, the monitor falls back to tray icons.
+
+![AI Usage Monitor usage panel showing Claude, Codex and Gemini limits and reset times](docs/images/usage-monitor.png)
 
 <img src="docs/images/settings.png" width="460" alt="AI Usage Monitor settings with provider, display, reset time and warning controls">
 
