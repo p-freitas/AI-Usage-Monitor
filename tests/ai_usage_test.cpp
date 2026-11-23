@@ -50,6 +50,31 @@ int main() {
     const auto weeklyReset = ai::FormatResets({-1, 0, true, {0, sampleReset}});
     CHECK(weeklyReset.size() > 6 && weeklyReset.substr(0, 3) == L"7d ");
     CHECK(weeklyReset.substr(weeklyReset.size() - 3) == std::wstring(expectedTime, 2) + L"h");
+
+    auto localTime = [](int year, int month, int day, int hour, int minute) {
+        std::tm date{};
+        date.tm_year = year - 1900;
+        date.tm_mon = month - 1;
+        date.tm_mday = day;
+        date.tm_hour = hour;
+        date.tm_min = minute;
+        date.tm_isdst = -1;
+        return std::mktime(&date);
+    };
+    const auto claudeNow = localTime(2026, 12, 31, 23, 30);
+    const char* usageScreen =
+        "Current session\r\n4% used\r\n  Resets 12:04am (America/Sao_Paulo)\r\n"
+        "Current week (all models)\r\n93% used\r\n  Resets Jan 2, 2027, 3pm (America/Sao_Paulo)\r\n"
+        "Current week (Sonnet only)\r\n98% used\r\n  Resets Jan 1, 2027, 5pm (America/Sao_Paulo)";
+    usage = ai::ParseClaude(ai::TerminalRows(usageScreen), refreshing, claudeNow);
+    CHECK(usage.fiveHours == 4 && usage.week == 93);
+    CHECK(usage.resetsAt[0] == localTime(2027, 1, 1, 0, 4));
+    CHECK(usage.resetsAt[1] == localTime(2027, 1, 2, 15, 0));
+    CHECK(ai::FormatResets(usage).find(L"5h 00:04, 7d ") == 0);
+    CHECK(ai::ParseClaudeReset("Resets Nov 25, 12pm (America/Sao_Paulo)",
+        localTime(2026, 11, 23, 1, 0)) == localTime(2026, 11, 25, 12, 0));
+    CHECK(ai::ParseClaudeReset("Resets Feb 30, 3pm", localTime(2027, 2, 27, 8, 0)) == 0);
+    CHECK(ai::ParseClaudeReset("Resets 12:70am", claudeNow) == 0);
     CHECK(ai::ClaudeStartupState(ai::TerminalRows("Starting Claude Code")) == ai::ClaudeStartup::Waiting);
     CHECK(ai::ClaudeStartupState(ai::TerminalRows("  $  ")) == ai::ClaudeStartup::Ready);
     CHECK(ai::ClaudeStartupState(ai::TerminalRows("Quick safety check\r\n  $  ")) == ai::ClaudeStartup::NeedsSetup);

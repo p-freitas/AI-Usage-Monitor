@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <cwchar>
@@ -404,7 +405,59 @@ std::array<std::string, TERMINAL_ROWS> TerminalRows(const std::string& output) {
     return rows;
 }
 
-Usage ParseClaude(const std::array<std::string, TERMINAL_ROWS>& rows, bool& refreshing) {
+long long ParseClaudeReset(const std::string& row, time_t now) {
+    auto label = row.find("Resets ");
+    if (label == std::string::npos) return 0;
+    const char* clock = row.c_str() + label + sizeof("Resets ") - 1;
+    // Claude prints an en-US clock in the local time zone, with a date for weekly limits.
+    std::tm local{};
+    if (localtime_s(&local, &now) != 0) return 0;
+    char month[4]{};
+    int day = 0, year = 0, consumed = 0;
+    if (std::sscanf(clock, "%3[A-Za-z] %2d, %n", month, &day, &consumed) == 2 && consumed) {
+        constexpr std::string_view months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+        auto index = months.find(month);
+        if (index == std::string_view::npos || index % 3 != 0 || day < 1 || day > 31) return 0;
+        const int resetMonth = static_cast<int>(index / 3);
+        if (resetMonth < local.tm_mon) ++local.tm_year;
+        local.tm_mon = resetMonth;
+        local.tm_mday = day;
+        clock += consumed;
+        consumed = 0;
+        if (std::sscanf(clock, "%4d, %n", &year, &consumed) == 1 && consumed) {
+            if (year < 1970) return 0;
+            local.tm_year = year - 1900;
+            clock += consumed;
+        }
+    }
+
+    int hour = 0, minute = 0;
+    char period[3]{};
+    consumed = 0;
+    if (std::sscanf(clock, "%2d:%2d %2[apmAPM]%n", &hour, &minute, period, &consumed) != 3) {
+        minute = 0;
+        if (std::sscanf(clock, "%2d %2[apmAPM]%n", &hour, period, &consumed) != 2) return 0;
+    }
+    const bool pm = _stricmp(period, "pm") == 0;
+    if ((!pm && _stricmp(period, "am") != 0) || hour < 1 || hour > 12 ||
+        minute < 0 || minute >= 60 || (clock[consumed] && clock[consumed] != ' ')) return 0;
+
+    local.tm_hour = hour % 12 + (pm ? 12 : 0);
+    local.tm_min = minute;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+    auto reset = std::mktime(&local);
+    if (day && local.tm_mday != day) return 0;
+    if (!day && reset >= 0 && reset < now) {
+        ++local.tm_mday;
+        local.tm_isdst = -1;
+        reset = std::mktime(&local);
+    }
+    return reset >= now ? reset : 0;
+}
+
+Usage ParseClaude(const std::array<std::string, TERMINAL_ROWS>& rows, bool& refreshing,
+                  time_t now = std::time(nullptr)) {
     Usage usage;
     refreshing = false;
     for (size_t i = 0; i + 1 < rows.size(); ++i) {
@@ -418,8 +471,19 @@ Usage ParseClaude(const std::array<std::string, TERMINAL_ROWS>& rows, bool& refr
         if (end == std::string::npos) continue;
         size_t start = end;
         while (start && meter[start - 1] >= '0' && meter[start - 1] <= '9') --start;
-        if (end - start >= 1 && end - start <= 3)
-            (session ? usage.fiveHours : usage.week) = std::min(100, std::stoi(meter.substr(start)));
+        if (end - start < 1 || end - start > 3) continue;
+        (session ? usage.fiveHours : usage.week) = std::min(100, std::stoi(meter.substr(start)));
+        auto reset = ParseClaudeReset(title, now);
+        if (!reset && i + 2 < rows.size()) {
+            const auto& detail = rows[i + 2];
+            auto first = detail.find_first_not_of(' ');
+            if (first != std::string::npos && detail.compare(first, 7, "Resets ") == 0)
+                reset = ParseClaudeReset(detail, now);
+        }
+        // Allow for daylight saving changes in the duration of a calendar week.
+        const int window = session ? 5 * 3600 : 7 * 86400 + 3600;
+        if (reset > now + window) reset = 0;
+        usage.resetsAt[session ? 0 : 1] = reset;
     }
     return usage;
 }
