@@ -177,9 +177,8 @@ std::wstring ConnectionHint(const UsageEntry& entry) {
         case ai::Connection::SignIn:
             return entry.provider == ai::Provider::Claude ? L"Sign in to Claude Code" : L"Sign in to Codex (Desktop or codex login)";
         case ai::Connection::Setup: return L"Complete Claude Code setup";
-        case ai::Connection::Unavailable: return L"Could not read usage. Try Refresh now";
+        case ai::Connection::Unavailable: return L"Can't read limits. Try a CLI update";
         case ai::Connection::Waiting: return L"Waiting for the first usage reading";
-        case ai::Connection::Unsupported: return L"Unverified Antigravity CLI version (tested: 1.5.15)";
         case ai::Connection::NoLimits: return L"No supported Gemini quota reported for this account";
         case ai::Connection::Ready: return {};
     }

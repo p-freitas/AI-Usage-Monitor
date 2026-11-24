@@ -7,7 +7,7 @@ namespace ai {
 
 enum class Provider { Claude, Codex, Gemini };
 enum class UsageSource { Account, Live, LastKnown };
-enum class Connection { Missing, Waiting, SignIn, Setup, Unavailable, Unsupported, NoLimits, Ready };
+enum class Connection { Missing, Waiting, SignIn, Setup, Unavailable, NoLimits, Ready };
 enum Limit : size_t { FiveHours, Week, ArgonWeek, LimitCount };
 struct Usage {
     std::array<int, LimitCount> used;

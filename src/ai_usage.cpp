@@ -178,7 +178,7 @@ public:
         if (console_) closeConsole_(console_);
     }
 
-    bool Start(const std::wstring& exe, Provider provider, bool versionOnly = false) {
+    bool Start(const std::wstring& exe, Provider provider, bool agyChangelog = false) {
         bool terminal = provider == Provider::Claude;
         std::wstring cwd = terminal ? ClaudeWorkDir() : Env(L"USERPROFILE");
         bool gemini = provider == Provider::Gemini;
@@ -225,7 +225,7 @@ public:
                                         streamHandles, sizeof(streamHandles), nullptr, nullptr);
 
         std::wstring args = L"\"" + exe + L"\"";
-        if (gemini) args += versionOnly ? L" --version" : L" -p /usage --output-format json";
+        if (gemini) args += agyChangelog ? L" changelog" : L" -p /usage --output-format json";
         else args += terminal ? ClaudeArgs() + L" --ax-screen-reader" : L" app-server --listen stdio://";
         auto env = (terminal || gemini) ? CliEnvironment(terminal) : std::wstring{};
         if (gemini && env.empty()) { DeleteProcThreadAttributeList(attrs); return false; }
@@ -263,9 +263,9 @@ public:
             written == input.size();
     }
 
-    bool Read(std::string& result) {
+    bool Read(std::string& result, size_t maxOutput = MAX_OUTPUT) {
         DWORD available = 0;
-        if (GetTickCount64() >= deadline_ || result.size() >= MAX_OUTPUT ||
+        if (GetTickCount64() >= deadline_ || result.size() >= maxOutput ||
             (stop_ && WaitForSingleObject(stop_, 0) == WAIT_OBJECT_0) ||
             !PeekNamedPipe(output_, nullptr, 0, nullptr, &available, nullptr)) return false;
         if (!available) {
@@ -306,7 +306,7 @@ Reading ParseGemini(const std::string& output) {
         !Number(Object(root.get("usage"), "total_tokens"), 0) ||
         !groups || groups->type != json::Json::Arr) return reading;
 
-    // Identifiers, units and UTC timestamps from the signed Windows 1.5.15 JSON report.
+    // Account quota buckets defined by the Antigravity usage report.
     struct Bucket { const char* group; const char* id; const char* window; Limit limit; };
     static constexpr Bucket known[] = {
         {"Gemini Models", "gemini-5h", "5h", FiveHours},
@@ -337,9 +337,11 @@ Reading ParseGemini(const std::string& output) {
     return reading;
 }
 
-bool VerifiedAgyVersion(const std::string& text) {
-    auto last = text.find_last_not_of("\r\n");
-    return last != std::string::npos && text.substr(0, last + 1) == "1.5.15";
+bool AgySupportsPrintUsage(std::string_view changelog) {
+    // Older CLIs can pass /usage to the model as a prompt.
+    // shortcut: read the bundled feature announcement until agy exposes a direct quota subcommand.
+    return changelog.find("read-only slash commands in print mode, so `-p \"/usage\"`") !=
+        std::string_view::npos;
 }
 
 Reading ReadGemini(const std::wstring& exe, HANDLE stop) {
@@ -349,33 +351,29 @@ Reading ReadGemini(const std::wstring& exe, HANDLE stop) {
         return missing;
     }
     Reading failure{{-1, -1, true}, Connection::Unavailable};
-    // Hold the same executable against replacement between the version probe and /usage.
+    // Hold the executable against replacement between capability discovery and /usage.
     Handle file{CreateFileW(exe.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr)};
     BY_HANDLE_FILE_INFORMATION info{};
     if (file == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file, &info)) return failure;
-    // Only the Gemini polling worker accesses this cache. A changed binary must be probed again.
-    static BY_HANDLE_FILE_INFORMATION verified{};
-    static std::wstring verifiedPath;
-    static bool compatible;
-    if (exe != verifiedPath || info.dwVolumeSerialNumber != verified.dwVolumeSerialNumber ||
-        info.nFileIndexHigh != verified.nFileIndexHigh || info.nFileIndexLow != verified.nFileIndexLow ||
-        info.nFileSizeHigh != verified.nFileSizeHigh || info.nFileSizeLow != verified.nFileSizeLow ||
-        CompareFileTime(&info.ftLastWriteTime, &verified.ftLastWriteTime) != 0) {
-        Cli version(stop);
-        if (!version.Start(exe, Provider::Gemini, true)) return failure;
-        std::string output;
-        while (version.Read(output)) {}
-        if (!version.Succeeded()) return failure;
-        verifiedPath = exe;
-        verified = info;
-        compatible = VerifiedAgyVersion(output);
+    // Only the Gemini polling worker accesses this cache.
+    static BY_HANDLE_FILE_INFORMATION checked{};
+    static std::wstring checkedPath;
+    static bool supportsUsage;
+    if (exe != checkedPath || info.dwVolumeSerialNumber != checked.dwVolumeSerialNumber ||
+        info.nFileIndexHigh != checked.nFileIndexHigh || info.nFileIndexLow != checked.nFileIndexLow ||
+        info.nFileSizeHigh != checked.nFileSizeHigh || info.nFileSizeLow != checked.nFileSizeLow ||
+        CompareFileTime(&info.ftLastWriteTime, &checked.ftLastWriteTime) != 0) {
+        Cli changelog(stop);
+        if (!changelog.Start(exe, Provider::Gemini, true)) return failure;
+        std::string notes;
+        constexpr size_t maxChangelog = 1024 * 1024;
+        while (changelog.Read(notes, maxChangelog)) {}
+        if (!changelog.Succeeded()) return failure;
+        checkedPath = exe;
+        checked = info;
+        supportsUsage = AgySupportsPrintUsage(notes);
     }
-    if (!compatible) {
-        failure.connection = Connection::Unsupported;
-        failure.usage.fullSnapshot = true;
-        return failure;
-    }
-    if (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT) return failure;
+    if (!supportsUsage || (stop && WaitForSingleObject(stop, 0) != WAIT_TIMEOUT)) return failure;
     Cli cli(stop);
     if (!cli.Start(exe, Provider::Gemini)) return failure;
     std::string output;
@@ -450,8 +448,7 @@ Reading ReadCodex(Cli& cli) {
             }
             if (Number(id, 3)) {
                 auto usage = ParseCodex(result);
-                return {usage, usage.Available() ? Connection::Ready :
-                    (result ? Connection::Waiting : Connection::Unavailable)};
+                return {usage, usage.Available() ? Connection::Ready : Connection::Unavailable};
             }
         }
     }
@@ -666,8 +663,7 @@ Reading ReadClaude(Cli& cli) {
             return {usage, Connection::Ready};
     }
     if (refreshing) return {{}, Connection::Waiting};
-    return {usage, usage.Available() ? Connection::Ready :
-        (submitted ? Connection::Waiting : Connection::Unavailable)};
+    return {usage, usage.Available() ? Connection::Ready : Connection::Unavailable};
 }
 
 } // namespace

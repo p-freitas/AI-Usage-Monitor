@@ -114,9 +114,10 @@ int main() {
     CHECK(expired.Apply({{24, -1, true, {reset - 7200, 0}}, now - 100, history}));
     CHECK(!expired.value.Available() && !expired.LastKnown());
 
-    CHECK(ai::VerifiedAgyVersion("1.5.15\r\n"));
-    for (auto version : {"1.1.10", "1.5.16", "1.5.150", "unknown", ""})
-        CHECK(!ai::VerifiedAgyVersion(version));
+    CHECK(ai::AgySupportsPrintUsage(
+        R"(Added non-interactive answers for the read-only slash commands in print mode, so `-p "/usage"`, `/quota`)"));
+    CHECK(!ai::AgySupportsPrintUsage("Fixed the interactive /usage panel"));
+    CHECK(!ai::AgySupportsPrintUsage(""));
 
     // Selected fields of the verified JSON envelope. The account may omit any bucket.
     const std::string quota = R"({"status":"SUCCESS","num_turns":0,"usage":{"total_tokens":0},"command":{

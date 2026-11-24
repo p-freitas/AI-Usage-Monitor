@@ -89,6 +89,7 @@ void CheckRefresh(HWND anchor) {
     for (auto& entry : g_usage) {
         entry.quota.value.installed = true;
         entry.connection = ai::Connection::Unavailable;
+        CHECK(ConnectionHint(entry).find(L"CLI update") != std::wstring::npos);
         entry.refresh = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         CHECK(entry.refresh);
         entry.worker = entry.refresh; // Use the actual worker wake event without running provider CLIs.
