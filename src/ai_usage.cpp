@@ -83,13 +83,16 @@ std::wstring CliEnvironment(bool claude) {
     // the account meters. Disable the updater without disabling quota reads.
     constexpr std::wstring_view UPDATE = L"DISABLE_AUTOUPDATER=";
     constexpr std::wstring_view NONINTERACTIVE = L"AGY_CLI_NONINTERACTIVE_HEADLESS=";
+    // agy spawns `--bg-updater` with its own console, which flashes a visible window.
+    constexpr std::wstring_view AGY_UPDATE = L"AGY_CLI_DISABLE_AUTO_UPDATE=";
     std::vector<std::wstring> entries;
     if (claude) entries = {std::wstring(HISTORY) + L"1", std::wstring(UPDATE) + L"1"};
-    else entries = {std::wstring(NONINTERACTIVE) + L"1"};
+    else entries = {std::wstring(NONINTERACTIVE) + L"1", std::wstring(AGY_UPDATE) + L"1"};
     auto env = GetEnvironmentStringsW();
     if (!env) return {};
     for (const wchar_t* entry = env; *entry; entry += wcslen(entry) + 1) {
-        if (!claude && _wcsnicmp(entry, NONINTERACTIVE.data(), NONINTERACTIVE.size()) == 0) continue;
+        if (!claude && (_wcsnicmp(entry, NONINTERACTIVE.data(), NONINTERACTIVE.size()) == 0 ||
+            _wcsnicmp(entry, AGY_UPDATE.data(), AGY_UPDATE.size()) == 0)) continue;
         if (claude && (_wcsnicmp(entry, HISTORY.data(), HISTORY.size()) == 0 ||
             _wcsnicmp(entry, UPDATE.data(), UPDATE.size()) == 0 ||
             _wcsnicmp(entry, L"CLAUDECODE=", 11) == 0)) continue;
