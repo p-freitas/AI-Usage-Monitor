@@ -83,16 +83,13 @@ std::wstring CliEnvironment(bool claude) {
     // the account meters. Disable the updater without disabling quota reads.
     constexpr std::wstring_view UPDATE = L"DISABLE_AUTOUPDATER=";
     constexpr std::wstring_view NONINTERACTIVE = L"AGY_CLI_NONINTERACTIVE_HEADLESS=";
-    // agy spawns `--bg-updater` with its own console, which flashes a visible window.
-    constexpr std::wstring_view AGY_UPDATE = L"AGY_CLI_DISABLE_AUTO_UPDATE=";
     std::vector<std::wstring> entries;
     if (claude) entries = {std::wstring(HISTORY) + L"1", std::wstring(UPDATE) + L"1"};
-    else entries = {std::wstring(NONINTERACTIVE) + L"1", std::wstring(AGY_UPDATE) + L"1"};
+    else entries = {std::wstring(NONINTERACTIVE) + L"1"};
     auto env = GetEnvironmentStringsW();
     if (!env) return {};
     for (const wchar_t* entry = env; *entry; entry += wcslen(entry) + 1) {
-        if (!claude && (_wcsnicmp(entry, NONINTERACTIVE.data(), NONINTERACTIVE.size()) == 0 ||
-            _wcsnicmp(entry, AGY_UPDATE.data(), AGY_UPDATE.size()) == 0)) continue;
+        if (!claude && _wcsnicmp(entry, NONINTERACTIVE.data(), NONINTERACTIVE.size()) == 0) continue;
         if (claude && (_wcsnicmp(entry, HISTORY.data(), HISTORY.size()) == 0 ||
             _wcsnicmp(entry, UPDATE.data(), UPDATE.size()) == 0 ||
             _wcsnicmp(entry, L"CLAUDECODE=", 11) == 0)) continue;
@@ -171,6 +168,30 @@ class Cli {
     Handle process_, job_, input_, output_;
     ULONGLONG deadline_ = GetTickCount64() + QUERY_MS;
     HANDLE stop_;
+    bool killChildren_ = false;
+
+    // agy forks a detached `--bg-updater` whose `--version` child opens a visible console window.
+    // The quota read needs only the main process, so end the other copies of its executable in the job.
+    void KillChildren() {
+        constexpr DWORD MAX_PIDS = 16;
+        alignas(JOBOBJECT_BASIC_PROCESS_ID_LIST) char buffer[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) +
+                                                             MAX_PIDS * sizeof(ULONG_PTR)];
+        auto* list = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(buffer);
+        if (!QueryInformationJobObject(job_, JobObjectBasicProcessIdList, list, sizeof(buffer), nullptr)) return;
+        auto image = [](HANDLE process) {
+            wchar_t path[MAX_PATH];
+            DWORD size = MAX_PATH;
+            return QueryFullProcessImageNameW(process, 0, path, &size) ? std::wstring(path, size) : std::wstring{};
+        };
+        auto self = image(process_);
+        DWORD main = GetProcessId(process_);
+        for (DWORD i = 0; i < list->NumberOfProcessIdsInList; ++i) {
+            DWORD pid = (DWORD)list->ProcessIdList[i];
+            if (pid == main || self.empty()) continue;
+            Handle child{OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)};
+            if (child.value && _wcsicmp(image(child).c_str(), self.c_str()) == 0) TerminateProcess(child, 1);
+        }
+    }
 
 public:
     explicit Cli(HANDLE stop) : stop_(stop) {}
@@ -252,6 +273,7 @@ public:
             return false;
         }
         if (gemini) input_.Close();
+        killChildren_ = gemini;
         return true;
     }
 
@@ -267,6 +289,7 @@ public:
     }
 
     bool Read(std::string& result, size_t maxOutput = MAX_OUTPUT) {
+        if (killChildren_) KillChildren();
         DWORD available = 0;
         if (GetTickCount64() >= deadline_ || result.size() >= maxOutput ||
             (stop_ && WaitForSingleObject(stop_, 0) == WAIT_OBJECT_0) ||

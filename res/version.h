@@ -1,6 +1,6 @@
 #pragma once
-#define AUM_VERSION_STRING "1.2.3"
-#define AUM_VERSION_NUMBERS 1,2,3,0
+#define AUM_VERSION_STRING "1.2.4"
+#define AUM_VERSION_NUMBERS 1,2,4,0
 #define AUM_WIDEN_VALUE(value) L##value
 #define AUM_WIDEN(value) AUM_WIDEN_VALUE(value)
 #define AUM_VERSION_WSTRING AUM_WIDEN(AUM_VERSION_STRING)
